@@ -1,0 +1,6 @@
+{
+  "depositId": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "to": "0x0000000000000000000000000000000000000002",
+  "amount": "1000000000000000000",
+  "scenario": "unhealthy"
+}

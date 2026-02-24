@@ -1,0 +1,17 @@
+{
+  "name": "greenreserve-workflow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "postinstall": "bun x cre-setup"
+  },
+  "dependencies": {
+    "@chainlink/cre-sdk": "^1.0.2",
+    "viem": "^2.21.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

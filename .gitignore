@@ -1,0 +1,23 @@
+.env
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.DS_Store
+
+# Foundry
+out/
+cache/
+broadcast/
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/lib/
+
+# CRE
+.cre/
+**/.cre/
+
+# Workflow build artifacts
+workflows/**/tmp.js
+workflows/**/tmp.wasm

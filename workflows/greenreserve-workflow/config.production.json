@@ -1,0 +1,11 @@
+{
+  "reserveApiBaseUrl": "http://127.0.0.1:8788",
+  "sepoliaChainSelectorName": "ethereum-testnet-sepolia",
+  "sepoliaCcipRouterAddress": "0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59",
+  "destChainSelector": "10344971235874465080",
+  "sepoliaTokenAAddress": "0x81fB2F7db0D448283a74f65883A14d11650929A1",
+  "sepoliaIssuerAddress": "0x9880Cb24f1DFa4df43a0B2F32360875a012aF0d2",
+  "sepoliaSenderAddress": "0xb99D431e9b35678C131A81eB976206Cd09625DE7",
+  "baseSepoliaTokenBAddress": "0x20F061Db666A0BC3Fa631C52f8a65DdA287264A1",
+  "baseSepoliaReceiverAddress": "0x66666fFD3b3595c6a45279e83CfDa770285bF1A7"
+}
