@@ -182,6 +182,7 @@ Note: the Sepolia CCIP sender contract pays CCIP fees from its own ETH balance. 
 See `contracts/.env.example`:
 - `PRIVATE_KEY` (deployer)
 - `BASE_RECEIVER` (used when deploying Sepolia sender/issuer)
+- `WORKFLOW_OPERATOR` (optional; set Issuer/Sender operator to the CRE workflow signer address)
 - `SEPOLIA_SENDER` (used when allowlisting sender on Base Sepolia receiver)
 - `CCIP_GAS_LIMIT` (optional)
 
@@ -201,6 +202,7 @@ forge script script/DeployBaseSepolia.s.sol:DeployBaseSepolia \
 cd contracts
 export PRIVATE_KEY=0x...
 export BASE_RECEIVER=0x...
+export WORKFLOW_OPERATOR=0x... # optional, defaults to deployer
 forge script script/DeploySepolia.s.sol:DeploySepolia \
   --rpc-url https://ethereum-sepolia-rpc.publicnode.com \
   --broadcast -vvvv

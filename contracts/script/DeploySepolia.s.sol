@@ -14,6 +14,7 @@ contract DeploySepolia is Script {
   function run() external {
     uint256 privateKey = vm.envUint("PRIVATE_KEY");
     address deployer = vm.addr(privateKey);
+    address operator = vm.envOr("WORKFLOW_OPERATOR", deployer);
 
     address destReceiver = vm.envAddress("BASE_RECEIVER");
     uint256 gasLimit = vm.envOr("CCIP_GAS_LIMIT", uint256(300_000));
@@ -21,7 +22,7 @@ contract DeploySepolia is Script {
     vm.startBroadcast(privateKey);
 
     GreenReserveTokenA tokenA = new GreenReserveTokenA("GreenReserve TokenA", "GRA", deployer);
-    GreenReserveIssuer issuer = new GreenReserveIssuer(address(tokenA), deployer, deployer);
+    GreenReserveIssuer issuer = new GreenReserveIssuer(address(tokenA), deployer, operator);
     tokenA.setMinter(address(issuer));
 
     GreenReserveCCIPSender sender = new GreenReserveCCIPSender(
@@ -29,13 +30,14 @@ contract DeploySepolia is Script {
       BASE_SEPOLIA_CHAIN_SELECTOR,
       destReceiver,
       deployer,
-      deployer,
+      operator,
       gasLimit
     );
 
     vm.stopBroadcast();
 
     console2.log("deployer", deployer);
+    console2.log("operator", operator);
     console2.log("tokenA", address(tokenA));
     console2.log("issuer", address(issuer));
     console2.log("sender", address(sender));
