@@ -61,7 +61,9 @@ contract GreenReserveCCIPSender is Ownable {
     return router.getFee(destinationChainSelector, message);
   }
 
-  function send(address to, uint256 amount, bytes32 depositId) external payable returns (bytes32 messageId) {
+  receive() external payable {}
+
+  function send(address to, uint256 amount, bytes32 depositId) external returns (bytes32 messageId) {
     if (msg.sender != operator) revert NotOperator(msg.sender);
     if (!router.isChainSupported(destinationChainSelector)) {
       revert IRouterClient.UnsupportedDestinationChain(destinationChainSelector);
@@ -69,7 +71,8 @@ contract GreenReserveCCIPSender is Ownable {
 
     Client.EVM2AnyMessage memory message = _buildMessage(to, amount, depositId);
     uint256 fee = router.getFee(destinationChainSelector, message);
-    if (msg.value < fee) revert InsufficientFee(msg.value, fee);
+    uint256 available = address(this).balance;
+    if (available < fee) revert InsufficientFee(available, fee);
 
     messageId = router.ccipSend{value: fee}(destinationChainSelector, message);
     emit MessageSent(messageId, depositId, to, amount);

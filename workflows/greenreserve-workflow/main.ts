@@ -52,6 +52,13 @@ const ISSUER_ABI = parseAbi([
   "function mint(address to, uint256 amount, bytes32 depositId)",
 ])
 
+const SENDER_ABI = parseAbi([
+  "function estimateFee(address to, uint256 amount, bytes32 depositId) view returns (uint256)",
+  "function send(address to, uint256 amount, bytes32 depositId) returns (bytes32)",
+])
+
+const RECEIVER_ABI = parseAbi(["function processedDepositId(bytes32 depositId) view returns (bool)"])
+
 const bytesToAscii = (bytes: Uint8Array): string => {
   let result = ""
   for (let i = 0; i < bytes.length; i++) result += String.fromCharCode(bytes[i])
@@ -181,6 +188,93 @@ const writeIssuerMint = (runtime: Runtime<Config>, issuerAddress: Address, to: A
     .result()
 }
 
+const readReceiverProcessedDepositId = (runtime: Runtime<Config>, receiverAddress: Address, depositId: `0x${string}`) => {
+  const destSelector = BigInt(runtime.config.destChainSelector)
+  const evmClient = new cre.capabilities.EVMClient(destSelector)
+
+  const callData = encodeFunctionData({
+    abi: RECEIVER_ABI,
+    functionName: "processedDepositId",
+    args: [depositId],
+  })
+
+  const contractCall = evmClient
+    .callContract(runtime, {
+      call: encodeCallMsg({
+        from: zeroAddress,
+        to: receiverAddress,
+        data: callData,
+      }),
+      blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
+    })
+    .result()
+
+  return decodeFunctionResult({
+    abi: RECEIVER_ABI,
+    functionName: "processedDepositId",
+    data: bytesToHex(contractCall.data),
+  }) as boolean
+}
+
+const readSenderEstimateFee = (runtime: Runtime<Config>, senderAddress: Address, to: Address, amount: bigint, depositId: `0x${string}`) => {
+  const network = getNetwork({
+    chainFamily: "evm",
+    chainSelectorName: runtime.config.sepoliaChainSelectorName,
+    isTestnet: true,
+  })
+  if (!network) throw new Error(`Network not found: ${runtime.config.sepoliaChainSelectorName}`)
+
+  const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector)
+
+  const callData = encodeFunctionData({
+    abi: SENDER_ABI,
+    functionName: "estimateFee",
+    args: [to, amount, depositId],
+  })
+
+  const contractCall = evmClient
+    .callContract(runtime, {
+      call: encodeCallMsg({
+        from: zeroAddress,
+        to: senderAddress,
+        data: callData,
+      }),
+      blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
+    })
+    .result()
+
+  return decodeFunctionResult({
+    abi: SENDER_ABI,
+    functionName: "estimateFee",
+    data: bytesToHex(contractCall.data),
+  }) as bigint
+}
+
+const writeSenderSend = (runtime: Runtime<Config>, senderAddress: Address, to: Address, amount: bigint, depositId: `0x${string}`) => {
+  const network = getNetwork({
+    chainFamily: "evm",
+    chainSelectorName: runtime.config.sepoliaChainSelectorName,
+    isTestnet: true,
+  })
+  if (!network) throw new Error(`Network not found: ${runtime.config.sepoliaChainSelectorName}`)
+
+  const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector)
+
+  const writeData = encodeFunctionData({
+    abi: SENDER_ABI,
+    functionName: "send",
+    args: [to, amount, depositId],
+  })
+
+  const report = runtime.report(prepareReportRequest(writeData)).result()
+  return evmClient
+    .writeReport(runtime, {
+      receiver: senderAddress,
+      report,
+    })
+    .result()
+}
+
 const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => {
   const deposit = parseDepositPayload(triggerOutput)
   runtime.log(`depositId=${deposit.depositId} to=${deposit.to} amount=${deposit.amount}`)
@@ -241,6 +335,41 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
 
   runtime.log(
     `mint_tx_status=${mintReply.txStatus.toString()} txHash=${mintReply.txHash ? bytesToHex(mintReply.txHash) : ""} error=${mintReply.errorMessage ?? ""}`
+  )
+
+  const senderAddress = runtime.config.sepoliaSenderAddress
+  const receiverAddress = runtime.config.baseSepoliaReceiverAddress
+
+  if (!senderAddress || !receiverAddress) {
+    runtime.log("ccip_send_skipped_missing_sender_or_receiver")
+    return "approved"
+  }
+
+  const alreadyProcessed = readReceiverProcessedDepositId(runtime, receiverAddress as Address, deposit.depositId as `0x${string}`)
+  if (alreadyProcessed) {
+    runtime.log("ccip_send_skipped_already_processed")
+    return "approved"
+  }
+
+  const fee = readSenderEstimateFee(
+    runtime,
+    senderAddress as Address,
+    deposit.to as Address,
+    BigInt(deposit.amount),
+    deposit.depositId as `0x${string}`
+  )
+  runtime.log(`ccip_fee_wei=${fee.toString()}`)
+
+  const sendReply = writeSenderSend(
+    runtime,
+    senderAddress as Address,
+    deposit.to as Address,
+    BigInt(deposit.amount),
+    deposit.depositId as `0x${string}`
+  )
+
+  runtime.log(
+    `ccip_tx_status=${sendReply.txStatus.toString()} txHash=${sendReply.txHash ? bytesToHex(sendReply.txHash) : ""} error=${sendReply.errorMessage ?? ""}`
   )
 
   return "approved"
