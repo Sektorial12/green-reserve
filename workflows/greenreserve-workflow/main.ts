@@ -6,6 +6,7 @@ import {
   encodeCallMsg,
   getNetwork,
   ok,
+  prepareReportRequest,
   text,
   type HTTPPayload,
   type Runtime,
@@ -45,6 +46,11 @@ const depositSchema = z.object({
 type DepositPayload = z.infer<typeof depositSchema>
 
 const ROUTER_ABI = parseAbi(["function isChainSupported(uint64 chainSelector) view returns (bool)"])
+
+const ISSUER_ABI = parseAbi([
+  "function usedDepositId(bytes32 depositId) view returns (bool)",
+  "function mint(address to, uint256 amount, bytes32 depositId)",
+])
 
 const bytesToAscii = (bytes: Uint8Array): string => {
   let result = ""
@@ -116,6 +122,65 @@ const readRouterIsChainSupported = (runtime: Runtime<Config>) => {
   return supported
 }
 
+const readIssuerUsedDepositId = (runtime: Runtime<Config>, issuerAddress: Address, depositId: `0x${string}`) => {
+  const network = getNetwork({
+    chainFamily: "evm",
+    chainSelectorName: runtime.config.sepoliaChainSelectorName,
+    isTestnet: true,
+  })
+  if (!network) throw new Error(`Network not found: ${runtime.config.sepoliaChainSelectorName}`)
+
+  const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector)
+
+  const callData = encodeFunctionData({
+    abi: ISSUER_ABI,
+    functionName: "usedDepositId",
+    args: [depositId],
+  })
+
+  const contractCall = evmClient
+    .callContract(runtime, {
+      call: encodeCallMsg({
+        from: zeroAddress,
+        to: issuerAddress,
+        data: callData,
+      }),
+      blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
+    })
+    .result()
+
+  return decodeFunctionResult({
+    abi: ISSUER_ABI,
+    functionName: "usedDepositId",
+    data: bytesToHex(contractCall.data),
+  }) as boolean
+}
+
+const writeIssuerMint = (runtime: Runtime<Config>, issuerAddress: Address, to: Address, amount: bigint, depositId: `0x${string}`) => {
+  const network = getNetwork({
+    chainFamily: "evm",
+    chainSelectorName: runtime.config.sepoliaChainSelectorName,
+    isTestnet: true,
+  })
+  if (!network) throw new Error(`Network not found: ${runtime.config.sepoliaChainSelectorName}`)
+
+  const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector)
+
+  const writeData = encodeFunctionData({
+    abi: ISSUER_ABI,
+    functionName: "mint",
+    args: [to, amount, depositId],
+  })
+
+  const report = runtime.report(prepareReportRequest(writeData)).result()
+  return evmClient
+    .writeReport(runtime, {
+      receiver: issuerAddress,
+      report,
+    })
+    .result()
+}
+
 const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => {
   const deposit = parseDepositPayload(triggerOutput)
   runtime.log(`depositId=${deposit.depositId} to=${deposit.to} amount=${deposit.amount}`)
@@ -153,6 +218,31 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
   }
 
   runtime.log(`approved: reserveRatioBps=${reserveRatioBps.toString()}`)
+
+  const issuerAddress = runtime.config.sepoliaIssuerAddress
+  if (!issuerAddress) {
+    runtime.log("approved_but_no_issuer_configured")
+    return "approved"
+  }
+
+  const used = readIssuerUsedDepositId(runtime, issuerAddress as Address, deposit.depositId as `0x${string}`)
+  if (used) {
+    runtime.log("mint_skipped_depositId_used")
+    return "approved"
+  }
+
+  const mintReply = writeIssuerMint(
+    runtime,
+    issuerAddress as Address,
+    deposit.to as Address,
+    BigInt(deposit.amount),
+    deposit.depositId as `0x${string}`
+  )
+
+  runtime.log(
+    `mint_tx_status=${mintReply.txStatus.toString()} txHash=${mintReply.txHash ? bytesToHex(mintReply.txHash) : ""} error=${mintReply.errorMessage ?? ""}`
+  )
+
   return "approved"
 }
 
