@@ -173,6 +173,8 @@ cre workflow simulate ./workflows/greenreserve-workflow \
   --broadcast
 ```
 
+Note: the Sepolia CCIP sender contract pays CCIP fees from its own ETH balance. Before running `--broadcast`, make sure the deployed `GreenReserveCCIPSender` address is funded with some Sepolia ETH.
+
 ## Contract deployment (Foundry)
 
 ### Environment variables
@@ -202,6 +204,17 @@ export BASE_RECEIVER=0x...
 forge script script/DeploySepolia.s.sol:DeploySepolia \
   --rpc-url https://ethereum-sepolia-rpc.publicnode.com \
   --broadcast -vvvv
+```
+
+### Fund Sepolia sender with ETH (for CCIP fees)
+
+`GreenReserveCCIPSender.send(...)` pays CCIP fees from the contract balance (not `msg.value`). Send some Sepolia ETH to the deployed sender address:
+
+```bash
+cast send <SEPOLIA_SENDER_ADDRESS> \
+  --value 0.01ether \
+  --private-key $PRIVATE_KEY \
+  --rpc-url https://ethereum-sepolia-rpc.publicnode.com
 ```
 
 ### Allowlist Sepolia sender on Base Sepolia receiver
