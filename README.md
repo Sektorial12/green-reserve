@@ -188,6 +188,8 @@ Notes:
 
 Note: the Sepolia CCIP sender contract pays CCIP fees from its own ETH balance. Before running `--broadcast`, make sure the deployed `GreenReserveCCIPSender` address is funded with some Sepolia ETH.
 
+For this demo, CCIP fees are paid in **native gas** (Sepolia ETH) because `GreenReserveCCIPSender` uses `feeToken = address(0)`. You do not need testnet LINK or CCIP test tokens for the message-only path implemented here.
+
 ## Contract deployment (Foundry)
 
 ### Environment variables
