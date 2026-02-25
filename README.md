@@ -156,6 +156,12 @@ Other payload fixtures:
 - `payloads/deposit-blocked.json`
 - `payloads/deposit-insufficient-reserves.json`
 
+Phase 7 scripts (recommended):
+
+```bash
+./scripts/dry-run.sh
+```
+
 ## CRE workflow simulation (broadcast)
 
 When the workflow starts writing to the EVM (mint + CCIP send), you will run simulation with `--broadcast`.
@@ -176,6 +182,26 @@ cre workflow simulate ./workflows/greenreserve-workflow \
   --http-payload @./workflows/greenreserve-workflow/payloads/deposit-allowlisted.json \
   --broadcast
 ```
+
+Phase 7 scripts (recommended):
+
+```bash
+./scripts/broadcast.sh
+```
+
+If you need more verbose debugging:
+
+```bash
+./scripts/broadcast-engine-logs.sh
+```
+
+After broadcast, verify onchain outcomes:
+
+```bash
+./scripts/verify.sh
+```
+
+CCIP delivery is asynchronous. If `processedDepositId=false` immediately after broadcast, wait a bit and run `./scripts/verify.sh` again.
 
 Notes:
 - `sepoliaWriteGasLimit` (in `workflows/greenreserve-workflow/config.staging.json`) controls the gas limit used for CRE EVM `writeReport` transactions. This matters because the forwarder executes the adapter and then the target contract logic (including the nested CCIP send).
