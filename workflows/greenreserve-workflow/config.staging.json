@@ -3,9 +3,12 @@
   "sepoliaChainSelectorName": "ethereum-testnet-sepolia",
   "sepoliaCcipRouterAddress": "0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59",
   "destChainSelector": "10344971235874465080",
-  "sepoliaTokenAAddress": "0x81fB2F7db0D448283a74f65883A14d11650929A1",
-  "sepoliaIssuerAddress": "0x9880Cb24f1DFa4df43a0B2F32360875a012aF0d2",
-  "sepoliaSenderAddress": "0xb99D431e9b35678C131A81eB976206Cd09625DE7",
+  "sepoliaWriteGasLimit": "1200000",
+  "sepoliaTokenAAddress": "0x6bf0a9cfdf9167af8d30e53475752db0dc802b80",
+  "sepoliaIssuerAddress": "0xcdda815db80ea21dad692b469f8d0e27e4853365",
+  "sepoliaIssuerWriteReceiverAddress": "0xDe84d37099e43d0e3931Ba16079575Ad8cF19B63",
+  "sepoliaSenderAddress": "0xc3ea3c53ed3504f4d527fccac5080249341ab185",
+  "sepoliaSenderWriteReceiverAddress": "0x79119BA0c58838675B2F45c53bC8685218149D63",
   "baseSepoliaTokenBAddress": "0x20F061Db666A0BC3Fa631C52f8a65DdA287264A1",
   "baseSepoliaReceiverAddress": "0x66666fFD3b3595c6a45279e83CfDa770285bF1A7"
 }

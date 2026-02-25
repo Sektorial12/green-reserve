@@ -35,7 +35,8 @@ The core idea:
     - Parse deposit payload
     - Call Reserve API + KYC policy with consensus aggregation
     - Read Sepolia CCIP Router `isChainSupported(destChainSelector)`
-    - Return approval result (next step: onchain mint + CCIP send)
+    - Mint on Sepolia (if approved and depositId unused)
+    - CCIP send to Base Sepolia (if not already processed on destination)
 
 ## Networks (current testnet targets)
 
@@ -56,9 +57,12 @@ These are also recorded in:
 - `workflows/greenreserve-workflow/config.production.json`
 
 - Sepolia:
-  - TokenA: `0x81fB2F7db0D448283a74f65883A14d11650929A1`
-  - Issuer: `0x9880Cb24f1DFa4df43a0B2F32360875a012aF0d2`
-  - Sender: `0xb99D431e9b35678C131A81eB976206Cd09625DE7`
+  - TokenA: `0x6bf0a9cfdf9167af8d30e53475752db0dc802b80`
+  - Issuer: `0xcdda815db80ea21dad692b469f8d0e27e4853365`
+  - Sender: `0xc3ea3c53ed3504f4d527fccac5080249341ab185`
+  - CRE Forwarder (EVM write): `0x15fC6ae953E024d975e77382eEeC56A9101f9F88`
+  - Issuer Write Receiver (adapter): `0xDe84d37099e43d0e3931Ba16079575Ad8cF19B63`
+  - Sender Write Receiver (adapter): `0x79119BA0c58838675B2F45c53bC8685218149D63`
 - Base Sepolia:
   - TokenB: `0x20F061Db666A0BC3Fa631C52f8a65DdA287264A1`
   - Receiver: `0x66666fFD3b3595c6a45279e83CfDa770285bF1A7`
@@ -173,6 +177,15 @@ cre workflow simulate ./workflows/greenreserve-workflow \
   --broadcast
 ```
 
+Notes:
+- `sepoliaWriteGasLimit` (in `workflows/greenreserve-workflow/config.staging.json`) controls the gas limit used for CRE EVM `writeReport` transactions. This matters because the forwarder executes the adapter and then the target contract logic (including the nested CCIP send).
+- CCIP execution on Base Sepolia is asynchronous. A successful Sepolia send only proves the message was accepted for routing; the destination chain state may update a bit later.
+- The workflow prints diagnostic logs after a successful send to help track delivery:
+  - `ccip_sender_config ...` (onchain sender config: router, destination chain selector, destination receiver, operator, gas limit)
+  - `ccip_messageId_from_receipt=...` (or `ccip_messageId_from_scan=...` fallback)
+  - `base_messageReceived ...` (destination receiver event)
+  - `base_routerMessageExecuted ...` (destination router execution evidence)
+
 Note: the Sepolia CCIP sender contract pays CCIP fees from its own ETH balance. Before running `--broadcast`, make sure the deployed `GreenReserveCCIPSender` address is funded with some Sepolia ETH.
 
 ## Contract deployment (Foundry)
@@ -207,6 +220,41 @@ forge script script/DeploySepolia.s.sol:DeploySepolia \
   --rpc-url https://ethereum-sepolia-rpc.publicnode.com \
   --broadcast -vvvv
 ```
+
+### Deploy Sepolia CRE write receiver adapters (Issuer + Sender)
+
+The CRE EVM Write Forwarder expects the receiver contract to implement `onReport(...)`. This repo uses `CREReportReceiverAdapter` as a thin receiver that forwards the call into the real target contract (`GreenReserveIssuer` / `GreenReserveCCIPSender`).
+
+Deploy the adapters:
+
+```bash
+cd contracts
+export PRIVATE_KEY=0x...
+export CRE_FORWARDER=0x15fC6ae953E024d975e77382eEeC56A9101f9F88
+export ISSUER=0x...
+export SENDER=0x...
+forge script script/DeploySepoliaAdapters.s.sol:DeploySepoliaAdapters \
+  --rpc-url https://ethereum-sepolia-rpc.publicnode.com \
+  --broadcast -vvvv
+```
+
+Then update Issuer/Sender operators to the adapter addresses (required because the adapter becomes `msg.sender` when calling the target contracts):
+
+```bash
+cast send <SEPOLIA_ISSUER_ADDRESS> \
+  "setOperator(address)" <ISSUER_ADAPTER_ADDRESS> \
+  --private-key $PRIVATE_KEY \
+  --rpc-url https://ethereum-sepolia-rpc.publicnode.com
+
+cast send <SEPOLIA_SENDER_ADDRESS> \
+  "setOperator(address)" <SENDER_ADAPTER_ADDRESS> \
+  --private-key $PRIVATE_KEY \
+  --rpc-url https://ethereum-sepolia-rpc.publicnode.com
+```
+
+Finally, set these addresses in the workflow config:
+- `sepoliaIssuerWriteReceiverAddress` = issuer adapter address
+- `sepoliaSenderWriteReceiverAddress` = sender adapter address
 
 ### Fund Sepolia sender with ETH (for CCIP fees)
 
