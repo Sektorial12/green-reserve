@@ -649,12 +649,45 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
 
   try {
     const senderConfig = readSenderConfig(runtime, senderAddress as Address)
+    const expectedDestSelector = BigInt(runtime.config.destChainSelector)
+    const expectedReceiver = receiverAddress as Address
+    const expectedOperator = (senderWriteReceiverAddress as Address)
+    const expectedRouter = runtime.config.sepoliaCcipRouterAddress as Address
+
     runtime.log(
       `ccip_sender_config onchain_router=${senderConfig.router} onchain_destChainSelector=${senderConfig.destinationChainSelector.toString()} onchain_destReceiver=${senderConfig.destinationReceiver} onchain_operator=${senderConfig.operator} onchain_gasLimit=${senderConfig.gasLimit.toString()}`
     )
     runtime.log(
       `ccip_sender_config expected_destChainSelector=${runtime.config.destChainSelector} expected_receiver=${receiverAddress}`
     )
+
+    if (senderConfig.router.toLowerCase() !== expectedRouter.toLowerCase()) {
+      runtime.log(
+        `ccip_send_skipped_sender_config_mismatch: router onchain=${senderConfig.router} expected=${expectedRouter}`
+      )
+      return "approved"
+    }
+
+    if (senderConfig.destinationChainSelector !== expectedDestSelector) {
+      runtime.log(
+        `ccip_send_skipped_sender_config_mismatch: destChainSelector onchain=${senderConfig.destinationChainSelector.toString()} expected=${expectedDestSelector.toString()}`
+      )
+      return "approved"
+    }
+
+    if (senderConfig.destinationReceiver.toLowerCase() !== expectedReceiver.toLowerCase()) {
+      runtime.log(
+        `ccip_send_skipped_sender_config_mismatch: destReceiver onchain=${senderConfig.destinationReceiver} expected=${expectedReceiver}`
+      )
+      return "approved"
+    }
+
+    if (senderConfig.operator.toLowerCase() !== expectedOperator.toLowerCase()) {
+      runtime.log(
+        `ccip_send_skipped_sender_config_mismatch: operator onchain=${senderConfig.operator} expected=${expectedOperator}`
+      )
+      return "approved"
+    }
   } catch (e) {
     runtime.log(`ccip_sender_config_error=${(e as Error).message}`)
   }
