@@ -21,7 +21,7 @@ fi
 
 cd "$REPO_ROOT"
 
-DEPOSIT_ID="$(jq -r .depositId "$PAYLOAD_FILE")"
+DEPOSIT_ID="${DEPOSIT_ID:-$(jq -r .depositId "$PAYLOAD_FILE")}"
 TO="$(jq -r .to "$PAYLOAD_FILE")"
 
 ISSUER="$(jq -r .sepoliaIssuerAddress "$CONFIG_FILE")"
@@ -35,6 +35,9 @@ echo
 echo "[sepolia] issuer=$ISSUER"
 USED=$(cast call "$ISSUER" "usedDepositId(bytes32)(bool)" "$DEPOSIT_ID" --rpc-url "$SEPOLIA_RPC")
 echo "usedDepositId=$USED"
+if [[ "$USED" == "true" ]]; then
+  echo "hint: usedDepositId is already true; choose a fresh DEPOSIT_ID (e.g., export DEPOSIT_ID=0x...)"
+fi
 echo
 
 echo "[base] receiver=$RECEIVER"
