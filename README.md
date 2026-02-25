@@ -79,6 +79,58 @@ These are also recorded in:
 - `project.yaml`
   - CRE RPC configuration per target
 
+## Phase 8 — Demo packaging
+
+### One-command demo steps
+
+In separate terminals:
+
+Terminal A (external system):
+
+```bash
+./scripts/demo-start-reserve-api.sh
+```
+
+Terminal B (allowlisted happy path, onchain):
+
+```bash
+./scripts/demo-allowlisted.sh
+```
+
+Terminal C (blocked address negative path):
+
+```bash
+./scripts/demo-blocked.sh
+```
+
+Terminal D (insufficient reserves negative path):
+
+```bash
+./scripts/demo-insufficient-reserves.sh
+```
+
+### Chainlink Usage Index
+
+CRE (workflow + EVM/HTTP capabilities):
+- `workflows/greenreserve-workflow/main.ts`
+- `workflows/greenreserve-workflow/workflow.yaml`
+- `project.yaml`
+
+CCIP (contracts):
+- `contracts/src/GreenReserveCCIPSender.sol`
+- `contracts/src/GreenReserveReceiver.sol`
+- `contracts/lib/ccip-contracts/` (vendored dependency)
+
+CRE EVM write receiver integration (forwarder adapters):
+- `contracts/src/CREReportReceiverAdapter.sol`
+- `contracts/script/DeploySepoliaAdapters.s.sol`
+
+### Evidence checklist
+
+- Record CLI output from `./scripts/demo-allowlisted.sh` showing non-empty tx hashes.
+- Screenshot `./scripts/verify.sh` output showing `processedDepositId=true` and `tokenBBalance` increased.
+- Record a negative path run (`./scripts/demo-blocked.sh` or `./scripts/demo-insufficient-reserves.sh`).
+
 ## Prerequisites
 
 - **Bun** (for workflow compilation + reserve-api)
