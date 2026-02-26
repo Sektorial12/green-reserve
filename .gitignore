@@ -5,6 +5,8 @@ dist/
 **/dist/
 .DS_Store
 
+roadmap-v2.md
+
 # Foundry
 out/
 cache/
