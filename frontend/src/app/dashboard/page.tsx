@@ -1,3 +1,4 @@
+import { OnchainStatusCard } from "@/components/OnchainStatusCard";
 import { ReserveStatusCard } from "@/components/ReserveStatusCard";
 import { Container } from "@/components/ui/Container";
 
@@ -15,7 +16,10 @@ export default function DashboardPage() {
 
       <main className="pb-16">
         <Container>
-          <ReserveStatusCard />
+          <div className="space-y-6">
+            <ReserveStatusCard />
+            <OnchainStatusCard />
+          </div>
         </Container>
       </main>
     </div>
