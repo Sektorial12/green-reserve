@@ -82,11 +82,23 @@ function DepositStageRow({ stage }: { stage: DepositStage }) {
               Block {stage.blockNumber.toString()}
             </div>
           ) : null}
+
+          {stage.confirmations !== undefined ? (
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {stage.confirmations.toString()} confirmations
+            </div>
+          ) : null}
         </div>
       </div>
 
       <div className="flex items-center gap-2">
         <Badge variant={stageStatus.variant}>{stageStatus.label}</Badge>
+
+        {stage.txHash ? (
+          <CopyButton value={stage.txHash} variant="secondary" size="sm">
+            Copy tx
+          </CopyButton>
+        ) : null}
 
         {stage.txHash && stage.chain ? (
           <a
@@ -183,7 +195,8 @@ export function DepositStatusCard({
       if (!isBytes32Hex(trimmed)) throw new Error("Invalid depositId");
       return deriveDepositStatus({ depositId: trimmed });
     },
-    retry: 0,
+    retry: 1,
+    retryDelay: (attempt) => Math.min(5_000, 1_000 * attempt),
     refetchOnWindowFocus: false,
   });
 
@@ -319,8 +332,16 @@ export function DepositStatusCard({
             <Skeleton className="h-[52px]" />
           </div>
         ) : query.error ? (
-          <div className="mt-3">
+          <div className="mt-3 space-y-2">
             <InlineError>Failed to derive deposit status.</InlineError>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => query.refetch()}
+              disabled={query.isFetching}
+            >
+              Retry
+            </Button>
           </div>
         ) : query.data ? (
           <div className="mt-4">

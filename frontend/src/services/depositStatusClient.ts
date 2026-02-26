@@ -53,6 +53,7 @@ export type DepositStage = {
   chain?: "sepolia" | "baseSepolia";
   txHash?: Hex;
   blockNumber?: bigint;
+  confirmations?: bigint;
   messageId?: Hex;
   reason?: string;
 };
@@ -80,6 +81,15 @@ function clampFromBlock(toBlock: bigint, lookbackBlocks: number) {
   const lookback = BigInt(lookbackBlocks);
   if (toBlock <= lookback) return BigInt(0);
   return toBlock - lookback;
+}
+
+function confirmationsFromBlock(params: {
+  latestBlock: bigint;
+  blockNumber?: bigint;
+}): bigint | undefined {
+  if (params.blockNumber === undefined) return undefined;
+  if (params.latestBlock < params.blockNumber) return BigInt(0);
+  return params.latestBlock - params.blockNumber + BigInt(1);
 }
 
 export async function deriveDepositStatus(params: {
@@ -206,6 +216,12 @@ export async function deriveDepositStatus(params: {
       chain: mint ? "sepolia" : undefined,
       txHash: mint?.transactionHash,
       blockNumber: mint?.blockNumber,
+      confirmations: mint
+        ? confirmationsFromBlock({
+            latestBlock: toBlockSepolia,
+            blockNumber: mint.blockNumber,
+          })
+        : undefined,
       reason:
         mintStageStatus === "bad" ? "Blocked by failed checks" : undefined,
     },
@@ -215,6 +231,12 @@ export async function deriveDepositStatus(params: {
       chain: sent ? "sepolia" : undefined,
       txHash: sent?.transactionHash,
       blockNumber: sent?.blockNumber,
+      confirmations: sent
+        ? confirmationsFromBlock({
+            latestBlock: toBlockSepolia,
+            blockNumber: sent.blockNumber,
+          })
+        : undefined,
       messageId: sent?.args.messageId,
       reason:
         sendStageStatus === "bad" ? "Blocked by previous stage" : undefined,
@@ -225,6 +247,12 @@ export async function deriveDepositStatus(params: {
       chain: received ? "baseSepolia" : undefined,
       txHash: received?.transactionHash,
       blockNumber: received?.blockNumber,
+      confirmations: received
+        ? confirmationsFromBlock({
+            latestBlock: toBlockBase,
+            blockNumber: received.blockNumber,
+          })
+        : undefined,
       messageId: received?.args.messageId,
       reason:
         receiveStageStatus === "bad" ? "Blocked by previous stage" : undefined,
@@ -235,6 +263,12 @@ export async function deriveDepositStatus(params: {
       chain: received ? "baseSepolia" : undefined,
       txHash: received?.transactionHash,
       blockNumber: received?.blockNumber,
+      confirmations: received
+        ? confirmationsFromBlock({
+            latestBlock: toBlockBase,
+            blockNumber: received.blockNumber,
+          })
+        : undefined,
       messageId: received?.args.messageId,
       reason:
         destinationMintStatus === "bad"

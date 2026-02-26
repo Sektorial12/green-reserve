@@ -1,35 +1,78 @@
 "use client";
 
-import { useAccount, useConnect, useDisconnect } from "wagmi";
+import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
+import { baseSepolia, sepolia } from "wagmi/chains";
 
 import { CopyButton } from "@/components/CopyButton";
+import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { chains } from "@/lib/wagmi";
 
 function formatAddress(address: string) {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
 export function WalletConnectButton() {
-  const { isConnected, address } = useAccount();
+  const { isConnected, address, chainId } = useAccount();
   const { connectors, connect, isPending } = useConnect();
   const { disconnect } = useDisconnect();
+  const {
+    switchChain,
+    isPending: isSwitching,
+    error: switchError,
+  } = useSwitchChain();
+
+  const activeChain = chainId ? chains.find((c) => c.id === chainId) : null;
+  const isSupportedChain = Boolean(activeChain);
 
   if (isConnected) {
     return (
-      <div className="flex items-center gap-3">
-        {address ? (
-          <CopyButton
-            value={address}
+      <div className="flex flex-col items-end gap-2">
+        <div className="flex items-center gap-3">
+          {address ? (
+            <CopyButton
+              value={address}
+              variant="secondary"
+              size="sm"
+              successTitle="Address copied"
+            >
+              {formatAddress(address)}
+            </CopyButton>
+          ) : null}
+          <Button variant="outline" size="sm" onClick={() => disconnect()}>
+            Disconnect
+          </Button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Badge variant={isSupportedChain ? "default" : "destructive"}>
+            {activeChain?.name ??
+              (chainId ? `Unsupported (${chainId})` : "Unknown")}
+          </Badge>
+
+          <Button
             variant="secondary"
             size="sm"
-            successTitle="Address copied"
+            onClick={() => switchChain({ chainId: sepolia.id })}
+            disabled={isSwitching}
           >
-            {formatAddress(address)}
-          </CopyButton>
+            Sepolia
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => switchChain({ chainId: baseSepolia.id })}
+            disabled={isSwitching}
+          >
+            Base Sepolia
+          </Button>
+        </div>
+
+        {switchError ? (
+          <div className="text-xs text-muted-foreground">
+            Failed to switch network.
+          </div>
         ) : null}
-        <Button variant="outline" size="sm" onClick={() => disconnect()}>
-          Disconnect
-        </Button>
       </div>
     );
   }
