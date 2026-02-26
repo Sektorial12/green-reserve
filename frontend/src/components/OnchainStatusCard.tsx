@@ -8,9 +8,12 @@ import { useAccount } from "wagmi";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
+import { InlineError } from "@/components/ui/InlineError";
 import { Input } from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { ChainIcon } from "@/components/ChainIcon";
 import { env } from "@/lib/env";
+import { bad, ok } from "@/lib/status";
 import {
   readErc20Balance,
   readIssuerPaused,
@@ -57,6 +60,12 @@ export function OnchainStatusCard() {
     retry: 1,
   });
 
+  const issuerStatus = onchainQuery.data
+    ? onchainQuery.data.paused
+      ? bad("Paused")
+      : ok("Active")
+    : null;
+
   const trimmedDepositId = depositIdInput.trim();
   const usedDepositIdQuery = useQuery({
     queryKey: ["onchain", "usedDepositId", trimmedDepositId],
@@ -77,12 +86,8 @@ export function OnchainStatusCard() {
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-base font-semibold">On-chain status</h2>
-            {onchainQuery.data ? (
-              <Badge
-                variant={onchainQuery.data.paused ? "destructive" : "success"}
-              >
-                {onchainQuery.data.paused ? "Paused" : "Active"}
-              </Badge>
+            {issuerStatus ? (
+              <Badge variant={issuerStatus.variant}>{issuerStatus.label}</Badge>
             ) : null}
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -113,9 +118,9 @@ export function OnchainStatusCard() {
             <Skeleton className="h-[74px]" />
           </div>
         ) : onchainQuery.error ? (
-          <p className="text-sm text-red-600">
+          <InlineError>
             Failed to load on-chain data. Ensure your network/RPC is available.
-          </p>
+          </InlineError>
         ) : onchainQuery.data ? (
           <div className="space-y-4">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -124,6 +129,7 @@ export function OnchainStatusCard() {
                   TokenA (Sepolia)
                 </div>
                 <div className="mt-1 flex items-baseline gap-2">
+                  <ChainIcon chain="sepolia" className="mr-1" />
                   <div className="font-mono text-sm">
                     {onchainQuery.data.tokenA.formatted}
                   </div>
@@ -138,6 +144,7 @@ export function OnchainStatusCard() {
                   TokenB (Base Sepolia)
                 </div>
                 <div className="mt-1 flex items-baseline gap-2">
+                  <ChainIcon chain="baseSepolia" className="mr-1" />
                   <div className="font-mono text-sm">
                     {onchainQuery.data.tokenB.formatted}
                   </div>
@@ -184,17 +191,23 @@ export function OnchainStatusCard() {
               </div>
 
               {depositIdError ? (
-                <p className="mt-2 text-sm text-red-600">{depositIdError}</p>
+                <div className="mt-2">
+                  <InlineError>{depositIdError}</InlineError>
+                </div>
               ) : null}
 
               {usedDepositIdQuery.data !== undefined ? (
                 <div className="mt-3 flex items-center gap-2">
                   <Badge
                     variant={
-                      usedDepositIdQuery.data ? "destructive" : "success"
+                      usedDepositIdQuery.data
+                        ? bad("Used").variant
+                        : ok("Unused").variant
                     }
                   >
-                    {usedDepositIdQuery.data ? "Used" : "Unused"}
+                    {usedDepositIdQuery.data
+                      ? bad("Used").label
+                      : ok("Unused").label}
                   </Badge>
                   <span className="text-sm text-muted-foreground">
                     {usedDepositIdQuery.data
@@ -205,9 +218,9 @@ export function OnchainStatusCard() {
               ) : null}
 
               {usedDepositIdQuery.error ? (
-                <p className="mt-2 text-sm text-red-600">
-                  Failed to check depositId.
-                </p>
+                <div className="mt-2">
+                  <InlineError>Failed to check depositId.</InlineError>
+                </div>
               ) : null}
             </div>
           </div>

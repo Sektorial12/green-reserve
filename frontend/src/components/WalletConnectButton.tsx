@@ -2,7 +2,12 @@
 
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 
+import { CopyButton } from "@/components/CopyButton";
 import { Button } from "@/components/ui/Button";
+
+function formatAddress(address: string) {
+  return `${address.slice(0, 6)}…${address.slice(-4)}`;
+}
 
 export function WalletConnectButton() {
   const { isConnected, address } = useAccount();
@@ -12,9 +17,16 @@ export function WalletConnectButton() {
   if (isConnected) {
     return (
       <div className="flex items-center gap-3">
-        <span className="text-sm font-mono text-muted-foreground">
-          {address}
-        </span>
+        {address ? (
+          <CopyButton
+            value={address}
+            variant="secondary"
+            size="sm"
+            successTitle="Address copied"
+          >
+            {formatAddress(address)}
+          </CopyButton>
+        ) : null}
         <Button variant="outline" size="sm" onClick={() => disconnect()}>
           Disconnect
         </Button>

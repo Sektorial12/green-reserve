@@ -5,7 +5,9 @@ import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
+import { InlineError } from "@/components/ui/InlineError";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { bad, ok } from "@/lib/status";
 import { reserveApi } from "@/services/reserveApiClient";
 
 function ratioLabelFromBps(bps: string) {
@@ -27,16 +29,21 @@ export function ReserveStatusCard() {
   const ratioOk =
     ratioNum !== null && Number.isFinite(ratioNum) && ratioNum >= 10_000;
 
+  const ratioStatus =
+    ratioNum !== null && Number.isFinite(ratioNum)
+      ? ratioOk
+        ? ok("Healthy")
+        : bad("Unhealthy")
+      : null;
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-base font-semibold">Reserves</h2>
-            {ratioNum !== null && Number.isFinite(ratioNum) ? (
-              <Badge variant={ratioOk ? "success" : "destructive"}>
-                {ratioOk ? "Healthy" : "Unhealthy"}
-              </Badge>
+            {ratioStatus ? (
+              <Badge variant={ratioStatus.variant}>{ratioStatus.label}</Badge>
             ) : null}
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -62,9 +69,9 @@ export function ReserveStatusCard() {
             <Skeleton className="h-[74px]" />
           </div>
         ) : error ? (
-          <p className="text-sm text-red-600">
+          <InlineError>
             Failed to load reserves. Make sure reserve-api is running.
-          </p>
+          </InlineError>
         ) : data ? (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="rounded-lg border border-border p-4">

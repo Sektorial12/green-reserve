@@ -1,3 +1,4 @@
+import { DepositStatusCard } from "@/components/DepositStatusCard";
 import { OnchainStatusCard } from "@/components/OnchainStatusCard";
 import { ReserveStatusCard } from "@/components/ReserveStatusCard";
 import { Container } from "@/components/ui/Container";
@@ -19,6 +20,7 @@ export default function DashboardPage() {
           <div className="space-y-6">
             <ReserveStatusCard />
             <OnchainStatusCard />
+            <DepositStatusCard />
           </div>
         </Container>
       </main>

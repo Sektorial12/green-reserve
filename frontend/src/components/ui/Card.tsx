@@ -8,7 +8,7 @@ export function Card({ className, ...props }: CardProps) {
   return (
     <div
       className={cn(
-        "rounded-xl border border-border bg-card text-card-foreground",
+        "rounded-[var(--radius-lg)] border border-border bg-card text-card-foreground shadow-[var(--shadow-sm)]",
         className,
       )}
       {...props}
@@ -19,11 +19,16 @@ export function Card({ className, ...props }: CardProps) {
 export type CardHeaderProps = React.HTMLAttributes<HTMLDivElement>;
 
 export function CardHeader({ className, ...props }: CardHeaderProps) {
-  return <div className={cn("p-6", className)} {...props} />;
+  return <div className={cn("p-[var(--space-6)]", className)} {...props} />;
 }
 
 export type CardContentProps = React.HTMLAttributes<HTMLDivElement>;
 
 export function CardContent({ className, ...props }: CardContentProps) {
-  return <div className={cn("px-6 pb-6", className)} {...props} />;
+  return (
+    <div
+      className={cn("px-[var(--space-6)] pb-[var(--space-6)]", className)}
+      {...props}
+    />
+  );
 }
