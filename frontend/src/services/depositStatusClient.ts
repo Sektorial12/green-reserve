@@ -8,6 +8,7 @@ import {
 import { baseSepolia, sepolia } from "viem/chains";
 
 import { env } from "@/lib/env";
+import { reserveApi } from "@/services/reserveApiClient";
 
 const sepoliaClient = createPublicClient({
   chain: sepolia,
@@ -37,19 +38,23 @@ const MESSAGE_RECEIVED_EVENT = parseAbiItem(
 
 export type DepositStatusStageId =
   | "DepositReceived"
-  | "ReserveCheckPassed"
-  | "PolicyCheckPassed"
-  | "MintSepoliaConfirmed"
-  | "CCIPSendConfirmed"
-  | "CCIPReceiveObserved";
+  | "ReserveCheck"
+  | "PolicyCheck"
+  | "MintSepolia"
+  | "CCIPSend"
+  | "CCIPReceive"
+  | "DestinationMint";
+
+export type DepositStageStatus = "unknown" | "pending" | "ok" | "bad";
 
 export type DepositStage = {
   id: DepositStatusStageId;
-  present: boolean;
+  status: DepositStageStatus;
   chain?: "sepolia" | "baseSepolia";
   txHash?: Hex;
   blockNumber?: bigint;
   messageId?: Hex;
+  reason?: string;
 };
 
 export type DerivedDepositStatus = {
@@ -80,6 +85,8 @@ function clampFromBlock(toBlock: bigint, lookbackBlocks: number) {
 export async function deriveDepositStatus(params: {
   depositId: Hex;
 }): Promise<DerivedDepositStatus> {
+  const reservePromise = reserveApi.reserves().catch(() => null);
+
   const toBlockSepolia = await sepoliaClient.getBlockNumber();
   const toBlockBase = await baseSepoliaClient.getBlockNumber();
 
@@ -126,32 +133,113 @@ export async function deriveDepositStatus(params: {
   const sent = sentLogs[sentLogs.length - 1];
   const received = receivedLogs[receivedLogs.length - 1];
 
+  const reserveState = await reservePromise;
+  const reserveRatioBps = reserveState?.reserveRatioBps ?? null;
+  const reserveRatioNum = reserveRatioBps
+    ? Number.parseInt(reserveRatioBps, 10)
+    : null;
+  const reserveRatioOk =
+    reserveRatioNum !== null &&
+    Number.isFinite(reserveRatioNum) &&
+    reserveRatioNum >= 10_000;
+  const reserveCheckStatus: DepositStageStatus = reserveState
+    ? reserveRatioOk
+      ? "ok"
+      : "bad"
+    : "unknown";
+
+  const policyAddress =
+    mint?.args?.to ?? sent?.args?.to ?? received?.args?.to ?? null;
+  const policyDecision = policyAddress
+    ? await reserveApi.policyKyc(policyAddress).catch(() => null)
+    : null;
+  const policyCheckStatus: DepositStageStatus = policyDecision
+    ? policyDecision.isAllowed
+      ? "ok"
+      : "bad"
+    : "unknown";
+
+  const checksFailed =
+    reserveCheckStatus === "bad" || policyCheckStatus === "bad";
+
+  const mintStageStatus: DepositStageStatus = mint
+    ? "ok"
+    : checksFailed
+      ? "bad"
+      : "pending";
+
+  const sendStageStatus: DepositStageStatus = sent
+    ? "ok"
+    : mintStageStatus === "bad"
+      ? "bad"
+      : "pending";
+
+  const receiveStageStatus: DepositStageStatus = received
+    ? "ok"
+    : sendStageStatus === "bad"
+      ? "bad"
+      : "pending";
+
+  const destinationMintStatus: DepositStageStatus = received
+    ? "ok"
+    : receiveStageStatus === "bad"
+      ? "bad"
+      : "pending";
+
   const stages: DepositStage[] = [
-    { id: "DepositReceived", present: false },
-    { id: "ReserveCheckPassed", present: false },
-    { id: "PolicyCheckPassed", present: false },
+    { id: "DepositReceived", status: "ok" },
     {
-      id: "MintSepoliaConfirmed",
-      present: Boolean(mint),
+      id: "ReserveCheck",
+      status: reserveCheckStatus,
+      reason: reserveState
+        ? `reserveRatioBps=${reserveState.reserveRatioBps}`
+        : undefined,
+    },
+    {
+      id: "PolicyCheck",
+      status: policyCheckStatus,
+      reason: policyDecision?.reason,
+    },
+    {
+      id: "MintSepolia",
+      status: mintStageStatus,
       chain: mint ? "sepolia" : undefined,
       txHash: mint?.transactionHash,
       blockNumber: mint?.blockNumber,
+      reason:
+        mintStageStatus === "bad" ? "Blocked by failed checks" : undefined,
     },
     {
-      id: "CCIPSendConfirmed",
-      present: Boolean(sent),
+      id: "CCIPSend",
+      status: sendStageStatus,
       chain: sent ? "sepolia" : undefined,
       txHash: sent?.transactionHash,
       blockNumber: sent?.blockNumber,
       messageId: sent?.args.messageId,
+      reason:
+        sendStageStatus === "bad" ? "Blocked by previous stage" : undefined,
     },
     {
-      id: "CCIPReceiveObserved",
-      present: Boolean(received),
+      id: "CCIPReceive",
+      status: receiveStageStatus,
       chain: received ? "baseSepolia" : undefined,
       txHash: received?.transactionHash,
       blockNumber: received?.blockNumber,
       messageId: received?.args.messageId,
+      reason:
+        receiveStageStatus === "bad" ? "Blocked by previous stage" : undefined,
+    },
+    {
+      id: "DestinationMint",
+      status: destinationMintStatus,
+      chain: received ? "baseSepolia" : undefined,
+      txHash: received?.transactionHash,
+      blockNumber: received?.blockNumber,
+      messageId: received?.args.messageId,
+      reason:
+        destinationMintStatus === "bad"
+          ? "Blocked by previous stage"
+          : undefined,
     },
   ];
 

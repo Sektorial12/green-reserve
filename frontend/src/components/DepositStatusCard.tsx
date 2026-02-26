@@ -15,7 +15,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { env } from "@/lib/env";
 import { addRecentDepositId } from "@/lib/depositHistory";
-import { ok, pending } from "@/lib/status";
+import { bad, ok, pending } from "@/lib/status";
 import {
   deriveDepositStatus,
   type DepositStage,
@@ -30,16 +30,18 @@ function stageLabel(stage: DepositStage["id"]) {
   switch (stage) {
     case "DepositReceived":
       return "Deposit received";
-    case "ReserveCheckPassed":
-      return "Reserve check passed";
-    case "PolicyCheckPassed":
-      return "Policy check passed";
-    case "MintSepoliaConfirmed":
+    case "ReserveCheck":
+      return "Reserve check";
+    case "PolicyCheck":
+      return "Policy check";
+    case "MintSepolia":
       return "Mint approved (Sepolia)";
-    case "CCIPSendConfirmed":
+    case "CCIPSend":
       return "CCIP message sent (Sepolia)";
-    case "CCIPReceiveObserved":
+    case "CCIPReceive":
       return "Message received (Base Sepolia)";
+    case "DestinationMint":
+      return "Destination mint (Base Sepolia)";
     default:
       return stage;
   }
@@ -54,7 +56,18 @@ function txUrl(chain: "sepolia" | "baseSepolia", txHash: string) {
 }
 
 function DepositStageRow({ stage }: { stage: DepositStage }) {
-  const stageStatus = stage.present ? ok("Done") : pending("Pending");
+  const isCheckStage =
+    stage.id === "ReserveCheck" || stage.id === "PolicyCheck";
+  const stageStatus =
+    stage.status === "ok"
+      ? isCheckStage
+        ? ok("Passed")
+        : ok("Done")
+      : stage.status === "bad"
+        ? bad(isCheckStage ? "Failed" : "Failed")
+        : stage.status === "pending"
+          ? pending("Pending")
+          : pending("Unknown");
 
   return (
     <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-3">
@@ -93,6 +106,8 @@ function DepositStageRow({ stage }: { stage: DepositStage }) {
 function StatusSummary({ status }: { status: DerivedDepositStatus }) {
   const sent = status.messageSent;
   const received = status.messageReceived;
+  const reserveStage = status.stages.find((s) => s.id === "ReserveCheck");
+  const policyStage = status.stages.find((s) => s.id === "PolicyCheck");
 
   return (
     <div className="space-y-3">
@@ -122,6 +137,14 @@ function StatusSummary({ status }: { status: DerivedDepositStatus }) {
         <p className="text-sm text-muted-foreground">
           Destination mint should be confirmed if TokenB balance increased.
         </p>
+      ) : null}
+
+      {reserveStage?.reason ? (
+        <p className="text-sm text-muted-foreground">{reserveStage.reason}</p>
+      ) : null}
+
+      {policyStage?.reason ? (
+        <p className="text-sm text-muted-foreground">{policyStage.reason}</p>
       ) : null}
     </div>
   );
@@ -171,9 +194,9 @@ export function DepositStatusCard({
   }, [autoCheck, trimmed, query]);
 
   const terminalStage = query.data?.stages.find(
-    (s) => s.id === "CCIPReceiveObserved",
+    (s) => s.id === "DestinationMint",
   );
-  const isTerminal = Boolean(terminalStage?.present);
+  const isTerminal = terminalStage?.status === "ok";
 
   React.useEffect(() => {
     if (!autoRefreshEnabled) return;
