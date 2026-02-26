@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { env } from "@/lib/env";
+import { addRecentDepositId } from "@/lib/depositHistory";
 import { ok, pending } from "@/lib/status";
 import {
   deriveDepositStatus,
@@ -126,9 +127,29 @@ function StatusSummary({ status }: { status: DerivedDepositStatus }) {
   );
 }
 
-export function DepositStatusCard() {
-  const [depositIdInput, setDepositIdInput] = React.useState("");
+export type DepositStatusCardProps = {
+  initialDepositId?: string;
+  autoCheck?: boolean;
+  autoRefresh?: boolean;
+  readOnly?: boolean;
+};
+
+export function DepositStatusCard({
+  initialDepositId,
+  autoCheck,
+  autoRefresh,
+  readOnly,
+}: DepositStatusCardProps) {
+  const [depositIdInput, setDepositIdInput] = React.useState(
+    initialDepositId ?? "",
+  );
   const [inputError, setInputError] = React.useState<string | null>(null);
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = React.useState(
+    Boolean(autoRefresh),
+  );
+  const [pollAttempt, setPollAttempt] = React.useState(0);
+  const [cooldownActive, setCooldownActive] = React.useState(false);
+  const cooldownTimerRef = React.useRef<number | null>(null);
 
   const trimmed = depositIdInput.trim();
 
@@ -143,6 +164,50 @@ export function DepositStatusCard() {
     refetchOnWindowFocus: false,
   });
 
+  React.useEffect(() => {
+    if (!autoCheck) return;
+    if (!isBytes32Hex(trimmed)) return;
+    void query.refetch();
+  }, [autoCheck, trimmed, query]);
+
+  const terminalStage = query.data?.stages.find(
+    (s) => s.id === "CCIPReceiveObserved",
+  );
+  const isTerminal = Boolean(terminalStage?.present);
+
+  React.useEffect(() => {
+    if (!autoRefreshEnabled) return;
+    if (!isBytes32Hex(trimmed)) return;
+    if (isTerminal) return;
+    if (query.isFetching) return;
+
+    if (!query.data) {
+      void query.refetch();
+      return;
+    }
+
+    const delayMs = Math.min(60_000, 2_000 * 2 ** pollAttempt);
+    const timer = window.setTimeout(() => {
+      setPollAttempt((n) => n + 1);
+      void query.refetch();
+    }, delayMs);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [autoRefreshEnabled, trimmed, isTerminal, pollAttempt, query]);
+
+  const manualRefreshCooldownMs = 3_000;
+  const refreshDisabled = query.isFetching || cooldownActive;
+
+  React.useEffect(() => {
+    return () => {
+      if (cooldownTimerRef.current !== null) {
+        window.clearTimeout(cooldownTimerRef.current);
+      }
+    };
+  }, []);
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-start justify-between gap-4">
@@ -154,25 +219,53 @@ export function DepositStatusCard() {
           </p>
         </div>
 
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={async () => {
-            const value = depositIdInput.trim();
-            if (!isBytes32Hex(value)) {
-              setInputError(
-                "depositId must be a 32-byte hex value (0x + 64 hex chars).",
-              );
-              return;
-            }
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              setAutoRefreshEnabled((v) => !v);
+              setPollAttempt(0);
+            }}
+            disabled={isTerminal}
+          >
+            Auto: {autoRefreshEnabled ? "On" : "Off"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              const value = depositIdInput.trim();
+              if (!isBytes32Hex(value)) {
+                setInputError(
+                  "depositId must be a 32-byte hex value (0x + 64 hex chars).",
+                );
+                return;
+              }
 
-            setInputError(null);
-            await query.refetch();
-          }}
-          disabled={query.isFetching}
-        >
-          {query.isFetching ? "Checking..." : "Check"}
-        </Button>
+              setInputError(null);
+              addRecentDepositId(value);
+              setPollAttempt(0);
+
+              if (cooldownTimerRef.current !== null) {
+                window.clearTimeout(cooldownTimerRef.current);
+              }
+              setCooldownActive(true);
+              cooldownTimerRef.current = window.setTimeout(() => {
+                setCooldownActive(false);
+              }, manualRefreshCooldownMs);
+
+              await query.refetch();
+            }}
+            disabled={refreshDisabled}
+          >
+            {query.isFetching
+              ? "Checking..."
+              : cooldownActive
+                ? "Wait..."
+                : "Refresh"}
+          </Button>
+        </div>
       </CardHeader>
 
       <CardContent>
@@ -180,11 +273,13 @@ export function DepositStatusCard() {
           <Input
             value={depositIdInput}
             onChange={(e) => {
+              if (readOnly) return;
               setDepositIdInput(e.target.value);
               setInputError(null);
             }}
             placeholder="0x… (bytes32 depositId)"
             className="font-mono"
+            disabled={readOnly}
           />
         </div>
 

@@ -23,27 +23,37 @@ export default function Home() {
 
       <main className="pb-16">
         <Container>
-          <div className="mb-6 flex items-center justify-between">
-            <a
-              href="/dashboard"
-              className="text-sm font-medium underline-offset-4 hover:underline"
-            >
-              Go to dashboard
-            </a>
-          </div>
-
           <Card>
             <CardHeader>
-              <h2 className="text-base font-semibold">Phase 2 scaffold</h2>
+              <h2 className="text-base font-semibold">Testnet demo</h2>
               <p className="mt-2 text-sm text-muted-foreground">
+                GreenReserve is a demo stablecoin flow across Sepolia and Base
+                Sepolia.
+              </p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                This UI is for testnets only. Do not use real funds.
+              </p>
+
+              <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+                <a
+                  href="/mint"
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-md)] bg-foreground px-4 text-sm font-medium text-background hover:opacity-90"
+                >
+                  Mint / Deposit
+                </a>
+                <a
+                  href="/dashboard"
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-md)] border border-border bg-background px-4 text-sm font-medium text-foreground hover:bg-muted"
+                >
+                  Dashboard
+                </a>
+              </div>
+
+              <p className="mt-4 text-sm text-muted-foreground">
                 Reserve API:{" "}
                 <span className="font-mono">
                   {env.NEXT_PUBLIC_RESERVE_API_BASE_URL}
                 </span>
-              </p>
-              <p className="mt-2 text-sm text-muted-foreground">
-                Next steps: add shadcn/ui, core screens, and CCIP status
-                tracking.
               </p>
             </CardHeader>
           </Card>

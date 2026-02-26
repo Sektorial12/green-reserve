@@ -53,8 +53,9 @@ export function DialogTrigger({ asChild, ...props }: DialogTriggerProps) {
   if (!ctx) throw new Error("DialogTrigger must be used within Dialog");
 
   if (asChild && React.isValidElement(props.children)) {
-    const child =
-      props.children as React.ReactElement<React.HTMLAttributes<HTMLElement>>;
+    const child = props.children as React.ReactElement<
+      React.HTMLAttributes<HTMLElement>
+    >;
 
     return React.cloneElement(child, {
       onClick: (e: React.MouseEvent<HTMLElement>) => {
