@@ -1,6 +1,7 @@
 "use client";
 
 import type { Hex } from "viem";
+import { useSearchParams } from "next/navigation";
 
 import { DepositStatusCard } from "@/components/DepositStatusCard";
 import { WalletConnectButton } from "@/components/WalletConnectButton";
@@ -16,7 +17,9 @@ export default function DepositDetailPage({
 }: {
   params: { depositId: string };
 }) {
+  const searchParams = useSearchParams();
   const depositId = decodeURIComponent(params.depositId);
+  const messageIdHint = searchParams.get("messageId")?.trim() ?? "";
 
   return (
     <div className="min-h-screen bg-background font-sans text-foreground">
@@ -47,6 +50,7 @@ export default function DepositDetailPage({
           ) : (
             <DepositStatusCard
               initialDepositId={depositId}
+              initialMessageIdHint={messageIdHint}
               autoCheck
               autoRefresh
               readOnly

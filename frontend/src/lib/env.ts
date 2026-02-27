@@ -20,6 +20,10 @@ const schema = z.object({
     .string()
     .url()
     .default("https://sepolia.basescan.org"),
+  NEXT_PUBLIC_CCIP_EXPLORER_BASE_URL: z
+    .string()
+    .url()
+    .default("https://ccip.chain.link"),
   NEXT_PUBLIC_LOG_LOOKBACK_BLOCKS: z.coerce
     .number()
     .int()
@@ -56,6 +60,8 @@ export const env = schema.parse({
     process.env.NEXT_PUBLIC_SEPOLIA_BLOCK_EXPLORER_BASE_URL,
   NEXT_PUBLIC_BASE_SEPOLIA_BLOCK_EXPLORER_BASE_URL:
     process.env.NEXT_PUBLIC_BASE_SEPOLIA_BLOCK_EXPLORER_BASE_URL,
+  NEXT_PUBLIC_CCIP_EXPLORER_BASE_URL:
+    process.env.NEXT_PUBLIC_CCIP_EXPLORER_BASE_URL,
   NEXT_PUBLIC_LOG_LOOKBACK_BLOCKS: process.env.NEXT_PUBLIC_LOG_LOOKBACK_BLOCKS,
   NEXT_PUBLIC_SEPOLIA_TOKEN_A_ADDRESS:
     process.env.NEXT_PUBLIC_SEPOLIA_TOKEN_A_ADDRESS,

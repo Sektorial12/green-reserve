@@ -1,6 +1,7 @@
 import {
   createPublicClient,
   http,
+  parseAbi,
   parseAbiItem,
   type Address,
   type Hex,
@@ -35,6 +36,12 @@ const MESSAGE_SENT_EVENT = parseAbiItem(
 const MESSAGE_RECEIVED_EVENT = parseAbiItem(
   "event MessageReceived(bytes32 indexed messageId, bytes32 indexed depositId, address indexed to, uint256 amount)",
 );
+
+const ROUTER_MESSAGE_EXECUTED_EVENT = parseAbiItem(
+  "event MessageExecuted(bytes32 messageId, uint64 sourceChainSelector, address offRamp, bytes32 calldataHash)",
+);
+
+const RECEIVER_ABI = parseAbi(["function getRouter() view returns (address)"]);
 
 export type DepositStatusStageId =
   | "DepositReceived"
@@ -94,6 +101,7 @@ function confirmationsFromBlock(params: {
 
 export async function deriveDepositStatus(params: {
   depositId: Hex;
+  messageIdHint?: Hex;
 }): Promise<DerivedDepositStatus> {
   const reservePromise = reserveApi.reserves().catch(() => null);
 
@@ -184,11 +192,45 @@ export async function deriveDepositStatus(params: {
       ? "bad"
       : "pending";
 
-  const receiveStageStatus: DepositStageStatus = received
+  const messageId = sent?.args?.messageId ?? params.messageIdHint;
+
+  const routerExecutedLog = messageId
+    ? await (async () => {
+        const routerAddress = await baseSepoliaClient.readContract({
+          address: env.NEXT_PUBLIC_BASE_SEPOLIA_RECEIVER_ADDRESS as Address,
+          abi: RECEIVER_ABI,
+          functionName: "getRouter",
+        });
+
+        const routerFromBlock = clampFromBlock(
+          toBlockBase,
+          Math.min(env.NEXT_PUBLIC_LOG_LOOKBACK_BLOCKS, 20_000),
+        );
+
+        const logs = await baseSepoliaClient.getLogs({
+          address: routerAddress as Address,
+          event: ROUTER_MESSAGE_EXECUTED_EVENT,
+          fromBlock: routerFromBlock,
+          toBlock: toBlockBase,
+        });
+
+        const matched = logs.filter(
+          (l) =>
+            l.args.messageId &&
+            l.args.messageId.toLowerCase() === messageId.toLowerCase(),
+        );
+
+        return matched[matched.length - 1];
+      })().catch(() => undefined)
+    : undefined;
+
+  const receiveStageStatus: DepositStageStatus = routerExecutedLog || received
     ? "ok"
     : sendStageStatus === "bad"
       ? "bad"
-      : "pending";
+      : messageId
+        ? "pending"
+        : "unknown";
 
   const destinationMintStatus: DepositStageStatus = received
     ? "ok"
@@ -237,25 +279,29 @@ export async function deriveDepositStatus(params: {
             blockNumber: sent.blockNumber,
           })
         : undefined,
-      messageId: sent?.args.messageId,
+      messageId: sent?.args.messageId ?? params.messageIdHint,
       reason:
         sendStageStatus === "bad" ? "Blocked by previous stage" : undefined,
     },
     {
       id: "CCIPReceive",
       status: receiveStageStatus,
-      chain: received ? "baseSepolia" : undefined,
-      txHash: received?.transactionHash,
-      blockNumber: received?.blockNumber,
-      confirmations: received
-        ? confirmationsFromBlock({
-            latestBlock: toBlockBase,
-            blockNumber: received.blockNumber,
-          })
-        : undefined,
-      messageId: received?.args.messageId,
+      chain: routerExecutedLog || received ? "baseSepolia" : undefined,
+      txHash: routerExecutedLog?.transactionHash ?? received?.transactionHash,
+      blockNumber: routerExecutedLog?.blockNumber ?? received?.blockNumber,
+      confirmations:
+        routerExecutedLog || received
+          ? confirmationsFromBlock({
+              latestBlock: toBlockBase,
+              blockNumber:
+                routerExecutedLog?.blockNumber ?? received?.blockNumber,
+            })
+          : undefined,
+      messageId: messageId,
       reason:
-        receiveStageStatus === "bad" ? "Blocked by previous stage" : undefined,
+        receiveStageStatus === "bad"
+          ? "Blocked by previous stage"
+          : undefined,
     },
     {
       id: "DestinationMint",
@@ -269,11 +315,13 @@ export async function deriveDepositStatus(params: {
             blockNumber: received.blockNumber,
           })
         : undefined,
-      messageId: received?.args.messageId,
+      messageId: received?.args.messageId ?? params.messageIdHint,
       reason:
         destinationMintStatus === "bad"
           ? "Blocked by previous stage"
-          : undefined,
+          : receiveStageStatus === "ok" && !received
+            ? "Router executed but receiver did not emit MessageReceived"
+            : undefined,
     },
   ];
 

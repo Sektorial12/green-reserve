@@ -39,9 +39,9 @@ function stageLabel(stage: DepositStage["id"]) {
     case "CCIPSend":
       return "CCIP message sent (Sepolia)";
     case "CCIPReceive":
-      return "Message received (Base Sepolia)";
+      return "Router executed (Base Sepolia)";
     case "DestinationMint":
-      return "Destination mint (Base Sepolia)";
+      return "Message received + minted (Base Sepolia)";
     default:
       return stage;
   }
@@ -53,6 +53,14 @@ function txUrl(chain: "sepolia" | "baseSepolia", txHash: string) {
       ? env.NEXT_PUBLIC_SEPOLIA_BLOCK_EXPLORER_BASE_URL
       : env.NEXT_PUBLIC_BASE_SEPOLIA_BLOCK_EXPLORER_BASE_URL;
   return `${base}/tx/${txHash}`;
+}
+
+function ccipMessageUrl(messageId: string) {
+  let base = env.NEXT_PUBLIC_CCIP_EXPLORER_BASE_URL;
+  base = base.replace(/\/$/, "");
+  base = base.replace(/#$/, "");
+  base = base.replace(/\/$/, "");
+  return `${base}/msg/${messageId}`;
 }
 
 function DepositStageRow({ stage }: { stage: DepositStage }) {
@@ -88,11 +96,34 @@ function DepositStageRow({ stage }: { stage: DepositStage }) {
               {stage.confirmations.toString()} confirmations
             </div>
           ) : null}
+
+          {stage.reason ? (
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {stage.reason}
+            </div>
+          ) : null}
         </div>
       </div>
 
       <div className="flex items-center gap-2">
         <Badge variant={stageStatus.variant}>{stageStatus.label}</Badge>
+
+        {stage.messageId ? (
+          <CopyButton value={stage.messageId} variant="secondary" size="sm">
+            Copy msg
+          </CopyButton>
+        ) : null}
+
+        {stage.messageId ? (
+          <a
+            href={ccipMessageUrl(stage.messageId)}
+            target="_blank"
+            rel="noreferrer"
+            className="text-sm font-medium underline-offset-4 hover:underline"
+          >
+            CCIP
+          </a>
+        ) : null}
 
         {stage.txHash ? (
           <CopyButton value={stage.txHash} variant="secondary" size="sm">
@@ -118,6 +149,13 @@ function DepositStageRow({ stage }: { stage: DepositStage }) {
 function StatusSummary({ status }: { status: DerivedDepositStatus }) {
   const sent = status.messageSent;
   const received = status.messageReceived;
+  const sendStage = status.stages.find((s) => s.id === "CCIPSend");
+  const receiveStage = status.stages.find((s) => s.id === "CCIPReceive");
+  const messageId =
+    sent?.messageId ??
+    received?.messageId ??
+    sendStage?.messageId ??
+    receiveStage?.messageId;
   const reserveStage = status.stages.find((s) => s.id === "ReserveCheck");
   const policyStage = status.stages.find((s) => s.id === "PolicyCheck");
 
@@ -133,17 +171,41 @@ function StatusSummary({ status }: { status: DerivedDepositStatus }) {
         </div>
       </div>
 
-      {sent?.messageId ? (
+      {messageId ? (
         <div className="rounded-lg border border-border p-4">
           <div className="text-xs text-muted-foreground">messageId</div>
           <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="truncate font-mono text-sm">{sent.messageId}</div>
-            <CopyButton value={sent.messageId} variant="secondary" size="sm">
-              Copy
-            </CopyButton>
+            <div className="truncate font-mono text-sm">{messageId}</div>
+            <div className="flex items-center gap-2">
+              <CopyButton value={messageId} variant="secondary" size="sm">
+                Copy
+              </CopyButton>
+              <a
+                href={ccipMessageUrl(messageId)}
+                target="_blank"
+                rel="noreferrer"
+                className="text-sm font-medium underline-offset-4 hover:underline"
+              >
+                CCIP Explorer
+              </a>
+            </div>
           </div>
         </div>
-      ) : null}
+      ) : (
+        <div className="rounded-lg border border-border p-4">
+          <div className="text-xs text-muted-foreground">CCIP explorer</div>
+          <div className="mt-1">
+            <a
+              href={env.NEXT_PUBLIC_CCIP_EXPLORER_BASE_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm font-medium underline-offset-4 hover:underline"
+            >
+              Open CCIP Explorer
+            </a>
+          </div>
+        </div>
+      )}
 
       {received?.messageId ? (
         <p className="text-sm text-muted-foreground">
@@ -164,6 +226,7 @@ function StatusSummary({ status }: { status: DerivedDepositStatus }) {
 
 export type DepositStatusCardProps = {
   initialDepositId?: string;
+  initialMessageIdHint?: string;
   autoCheck?: boolean;
   autoRefresh?: boolean;
   readOnly?: boolean;
@@ -171,6 +234,7 @@ export type DepositStatusCardProps = {
 
 export function DepositStatusCard({
   initialDepositId,
+  initialMessageIdHint,
   autoCheck,
   autoRefresh,
   readOnly,
@@ -178,22 +242,33 @@ export function DepositStatusCard({
   const [depositIdInput, setDepositIdInput] = React.useState(
     initialDepositId ?? "",
   );
+  const [messageIdHintInput, setMessageIdHintInput] = React.useState(
+    initialMessageIdHint ?? "",
+  );
   const [inputError, setInputError] = React.useState<string | null>(null);
+  const [messageIdError, setMessageIdError] = React.useState<string | null>(
+    null,
+  );
   const [autoRefreshEnabled, setAutoRefreshEnabled] = React.useState(
     Boolean(autoRefresh),
   );
   const [pollAttempt, setPollAttempt] = React.useState(0);
+  const [pollStartedAt, setPollStartedAt] = React.useState<number | null>(null);
   const [cooldownActive, setCooldownActive] = React.useState(false);
   const cooldownTimerRef = React.useRef<number | null>(null);
 
   const trimmed = depositIdInput.trim();
+  const trimmedMessageIdHint = messageIdHintInput.trim();
+  const messageIdHint = isBytes32Hex(trimmedMessageIdHint)
+    ? trimmedMessageIdHint
+    : undefined;
 
   const query = useQuery({
-    queryKey: ["depositStatus", trimmed],
+    queryKey: ["depositStatus", trimmed, trimmedMessageIdHint],
     enabled: false,
     queryFn: async () => {
       if (!isBytes32Hex(trimmed)) throw new Error("Invalid depositId");
-      return deriveDepositStatus({ depositId: trimmed });
+      return deriveDepositStatus({ depositId: trimmed, messageIdHint });
     },
     retry: 1,
     retryDelay: (attempt) => Math.min(5_000, 1_000 * attempt),
@@ -204,7 +279,7 @@ export function DepositStatusCard({
     if (!autoCheck) return;
     if (!isBytes32Hex(trimmed)) return;
     void query.refetch();
-  }, [autoCheck, trimmed, query]);
+  }, [autoCheck, trimmed, trimmedMessageIdHint, query]);
 
   const terminalStage = query.data?.stages.find(
     (s) => s.id === "DestinationMint",
@@ -217,8 +292,19 @@ export function DepositStatusCard({
     if (isTerminal) return;
     if (query.isFetching) return;
 
+    if (pollStartedAt === null) {
+      setPollStartedAt(Date.now());
+    }
+
     if (!query.data) {
       void query.refetch();
+      return;
+    }
+
+    const maxAttempts = 12;
+    const maxDurationMs = 10 * 60_000;
+    if (pollAttempt >= maxAttempts) return;
+    if (pollStartedAt !== null && Date.now() - pollStartedAt >= maxDurationMs) {
       return;
     }
 
@@ -231,7 +317,14 @@ export function DepositStatusCard({
     return () => {
       window.clearTimeout(timer);
     };
-  }, [autoRefreshEnabled, trimmed, isTerminal, pollAttempt, query]);
+  }, [
+    autoRefreshEnabled,
+    trimmed,
+    isTerminal,
+    pollAttempt,
+    pollStartedAt,
+    query,
+  ]);
 
   const manualRefreshCooldownMs = 3_000;
   const refreshDisabled = query.isFetching || cooldownActive;
@@ -253,6 +346,9 @@ export function DepositStatusCard({
             Derives status from on-chain events (MintApproved / MessageSent /
             MessageReceived).
           </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            CCIP delivery is async and may take a few minutes.
+          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -262,6 +358,7 @@ export function DepositStatusCard({
             onClick={() => {
               setAutoRefreshEnabled((v) => !v);
               setPollAttempt(0);
+              setPollStartedAt(null);
             }}
             disabled={isTerminal}
           >
@@ -279,9 +376,19 @@ export function DepositStatusCard({
                 return;
               }
 
+              const msgValue = messageIdHintInput.trim();
+              if (msgValue && !isBytes32Hex(msgValue)) {
+                setMessageIdError(
+                  "messageId must be a 32-byte hex value (0x + 64 hex chars).",
+                );
+                return;
+              }
+
               setInputError(null);
+              setMessageIdError(null);
               addRecentDepositId(value);
               setPollAttempt(0);
+              setPollStartedAt(null);
 
               if (cooldownTimerRef.current !== null) {
                 window.clearTimeout(cooldownTimerRef.current);
@@ -319,9 +426,28 @@ export function DepositStatusCard({
           />
         </div>
 
+        <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+          <Input
+            value={messageIdHintInput}
+            onChange={(e) => {
+              setMessageIdHintInput(e.target.value);
+              setMessageIdError(null);
+            }}
+            placeholder="0x… (optional messageId hint)"
+            className="font-mono"
+            disabled={readOnly}
+          />
+        </div>
+
         {inputError ? (
           <div className="mt-3">
             <InlineError>{inputError}</InlineError>
+          </div>
+        ) : null}
+
+        {messageIdError ? (
+          <div className="mt-3">
+            <InlineError>{messageIdError}</InlineError>
           </div>
         ) : null}
 
