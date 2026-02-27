@@ -13,16 +13,20 @@ import { reserveApi } from "@/services/reserveApiClient";
 
 const sepoliaClient = createPublicClient({
   chain: sepolia,
-  transport: env.NEXT_PUBLIC_SEPOLIA_RPC_URL
-    ? http(env.NEXT_PUBLIC_SEPOLIA_RPC_URL)
-    : http(),
+  transport: http(env.NEXT_PUBLIC_SEPOLIA_RPC_URL, {
+    timeout: 10_000,
+    retryCount: 2,
+    retryDelay: 1_000,
+  }),
 });
 
 const baseSepoliaClient = createPublicClient({
   chain: baseSepolia,
-  transport: env.NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL
-    ? http(env.NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL)
-    : http(),
+  transport: http(env.NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL, {
+    timeout: 10_000,
+    retryCount: 2,
+    retryDelay: 1_000,
+  }),
 });
 
 const MINT_APPROVED_EVENT = parseAbiItem(
@@ -40,6 +44,10 @@ const MESSAGE_RECEIVED_EVENT = parseAbiItem(
 const ROUTER_MESSAGE_EXECUTED_EVENT = parseAbiItem(
   "event MessageExecuted(bytes32 messageId, uint64 sourceChainSelector, address offRamp, bytes32 calldataHash)",
 );
+
+const ISSUER_ABI = parseAbi([
+  "function usedDepositId(bytes32 depositId) view returns (bool)",
+]);
 
 const RECEIVER_ABI = parseAbi(["function getRouter() view returns (address)"]);
 
@@ -91,9 +99,11 @@ function clampFromBlock(toBlock: bigint, lookbackBlocks: number) {
 }
 
 function confirmationsFromBlock(params: {
-  latestBlock: bigint;
+  latestBlock?: bigint | null;
   blockNumber?: bigint;
 }): bigint | undefined {
+  if (params.latestBlock === undefined || params.latestBlock === null)
+    return undefined;
   if (params.blockNumber === undefined) return undefined;
   if (params.latestBlock < params.blockNumber) return BigInt(0);
   return params.latestBlock - params.blockNumber + BigInt(1);
@@ -103,53 +113,83 @@ export async function deriveDepositStatus(params: {
   depositId: Hex;
   messageIdHint?: Hex;
 }): Promise<DerivedDepositStatus> {
+  const MIN_SEPOLIA_CONFIRMATIONS = BigInt(2);
+  const MIN_BASE_SEPOLIA_CONFIRMATIONS = BigInt(2);
+
   const reservePromise = reserveApi.reserves().catch(() => null);
 
-  const toBlockSepolia = await sepoliaClient.getBlockNumber();
-  const toBlockBase = await baseSepoliaClient.getBlockNumber();
+  const [toBlockSepolia, toBlockBase] = await Promise.all([
+    sepoliaClient.getBlockNumber().catch(() => null),
+    baseSepoliaClient.getBlockNumber().catch(() => null),
+  ]);
 
-  const fromBlockSepolia = clampFromBlock(
-    toBlockSepolia,
-    env.NEXT_PUBLIC_LOG_LOOKBACK_BLOCKS,
-  );
-  const fromBlockBase = clampFromBlock(
-    toBlockBase,
-    env.NEXT_PUBLIC_LOG_LOOKBACK_BLOCKS,
-  );
+  const sepoliaRpcOk = toBlockSepolia !== null;
+  const baseRpcOk = toBlockBase !== null;
+
+  const fromBlockSepolia = sepoliaRpcOk
+    ? clampFromBlock(toBlockSepolia, env.NEXT_PUBLIC_LOG_LOOKBACK_BLOCKS)
+    : null;
+  const fromBlockBase = baseRpcOk
+    ? clampFromBlock(toBlockBase, env.NEXT_PUBLIC_LOG_LOOKBACK_BLOCKS)
+    : null;
 
   const [mintLogs, sentLogs, receivedLogs] = await Promise.all([
-    sepoliaClient.getLogs({
-      address: env.NEXT_PUBLIC_SEPOLIA_ISSUER_ADDRESS as Address,
-      event: MINT_APPROVED_EVENT,
-      args: {
-        depositId: params.depositId,
-      },
-      fromBlock: fromBlockSepolia,
-      toBlock: toBlockSepolia,
-    }),
-    sepoliaClient.getLogs({
-      address: env.NEXT_PUBLIC_SEPOLIA_SENDER_ADDRESS as Address,
-      event: MESSAGE_SENT_EVENT,
-      args: {
-        depositId: params.depositId,
-      },
-      fromBlock: fromBlockSepolia,
-      toBlock: toBlockSepolia,
-    }),
-    baseSepoliaClient.getLogs({
-      address: env.NEXT_PUBLIC_BASE_SEPOLIA_RECEIVER_ADDRESS as Address,
-      event: MESSAGE_RECEIVED_EVENT,
-      args: {
-        depositId: params.depositId,
-      },
-      fromBlock: fromBlockBase,
-      toBlock: toBlockBase,
-    }),
+    sepoliaRpcOk && fromBlockSepolia !== null
+      ? sepoliaClient
+          .getLogs({
+            address: env.NEXT_PUBLIC_SEPOLIA_ISSUER_ADDRESS as Address,
+            event: MINT_APPROVED_EVENT,
+            args: {
+              depositId: params.depositId,
+            },
+            fromBlock: fromBlockSepolia,
+            toBlock: toBlockSepolia,
+          })
+          .catch(() => [])
+      : Promise.resolve([]),
+    sepoliaRpcOk && fromBlockSepolia !== null
+      ? sepoliaClient
+          .getLogs({
+            address: env.NEXT_PUBLIC_SEPOLIA_SENDER_ADDRESS as Address,
+            event: MESSAGE_SENT_EVENT,
+            args: {
+              depositId: params.depositId,
+            },
+            fromBlock: fromBlockSepolia,
+            toBlock: toBlockSepolia,
+          })
+          .catch(() => [])
+      : Promise.resolve([]),
+    baseRpcOk && fromBlockBase !== null
+      ? baseSepoliaClient
+          .getLogs({
+            address: env.NEXT_PUBLIC_BASE_SEPOLIA_RECEIVER_ADDRESS as Address,
+            event: MESSAGE_RECEIVED_EVENT,
+            args: {
+              depositId: params.depositId,
+            },
+            fromBlock: fromBlockBase,
+            toBlock: toBlockBase,
+          })
+          .catch(() => [])
+      : Promise.resolve([]),
   ]);
 
   const mint = mintLogs[mintLogs.length - 1];
   const sent = sentLogs[sentLogs.length - 1];
   const received = receivedLogs[receivedLogs.length - 1];
+
+  const issuerUsedDepositId =
+    sepoliaRpcOk && toBlockSepolia !== null
+      ? await sepoliaClient
+          .readContract({
+            address: env.NEXT_PUBLIC_SEPOLIA_ISSUER_ADDRESS as Address,
+            abi: ISSUER_ABI,
+            functionName: "usedDepositId",
+            args: [params.depositId],
+          })
+          .catch(() => null)
+      : null;
 
   const reserveState = await reservePromise;
   const reserveRatioBps = reserveState?.reserveRatioBps ?? null;
@@ -180,63 +220,126 @@ export async function deriveDepositStatus(params: {
   const checksFailed =
     reserveCheckStatus === "bad" || policyCheckStatus === "bad";
 
+  const mintConfirmations = mint
+    ? confirmationsFromBlock({
+        latestBlock: toBlockSepolia,
+        blockNumber: mint.blockNumber,
+      })
+    : undefined;
+  const mintFinal =
+    mintConfirmations !== undefined &&
+    mintConfirmations >= MIN_SEPOLIA_CONFIRMATIONS;
+  const mintObserved = Boolean(mint) || issuerUsedDepositId === true;
+
   const mintStageStatus: DepositStageStatus = mint
-    ? "ok"
-    : checksFailed
-      ? "bad"
-      : "pending";
+    ? mintFinal
+      ? "ok"
+      : "pending"
+    : mintObserved
+      ? "ok"
+      : checksFailed
+        ? "bad"
+        : !sepoliaRpcOk
+          ? "unknown"
+          : "pending";
+
+  const sentConfirmations = sent
+    ? confirmationsFromBlock({
+        latestBlock: toBlockSepolia,
+        blockNumber: sent.blockNumber,
+      })
+    : undefined;
+  const sentFinal =
+    sentConfirmations !== undefined &&
+    sentConfirmations >= MIN_SEPOLIA_CONFIRMATIONS;
 
   const sendStageStatus: DepositStageStatus = sent
-    ? "ok"
+    ? sentFinal
+      ? "ok"
+      : "pending"
     : mintStageStatus === "bad"
       ? "bad"
-      : "pending";
+      : !sepoliaRpcOk
+        ? "unknown"
+        : "pending";
 
   const messageId = sent?.args?.messageId ?? params.messageIdHint;
 
-  const routerExecutedLog = messageId
-    ? await (async () => {
-        const routerAddress = await baseSepoliaClient.readContract({
-          address: env.NEXT_PUBLIC_BASE_SEPOLIA_RECEIVER_ADDRESS as Address,
-          abi: RECEIVER_ABI,
-          functionName: "getRouter",
-        });
+  const routerExecutedLog =
+    messageId && baseRpcOk && toBlockBase !== null
+      ? await (async () => {
+          const routerAddress = await baseSepoliaClient.readContract({
+            address: env.NEXT_PUBLIC_BASE_SEPOLIA_RECEIVER_ADDRESS as Address,
+            abi: RECEIVER_ABI,
+            functionName: "getRouter",
+          });
 
-        const routerFromBlock = clampFromBlock(
-          toBlockBase,
-          Math.min(env.NEXT_PUBLIC_LOG_LOOKBACK_BLOCKS, 20_000),
-        );
+          const routerFromBlock = clampFromBlock(
+            toBlockBase,
+            Math.min(env.NEXT_PUBLIC_LOG_LOOKBACK_BLOCKS, 20_000),
+          );
 
-        const logs = await baseSepoliaClient.getLogs({
-          address: routerAddress as Address,
-          event: ROUTER_MESSAGE_EXECUTED_EVENT,
-          fromBlock: routerFromBlock,
-          toBlock: toBlockBase,
-        });
+          const logs = await baseSepoliaClient.getLogs({
+            address: routerAddress as Address,
+            event: ROUTER_MESSAGE_EXECUTED_EVENT,
+            fromBlock: routerFromBlock,
+            toBlock: toBlockBase,
+          });
 
-        const matched = logs.filter(
-          (l) =>
-            l.args.messageId &&
-            l.args.messageId.toLowerCase() === messageId.toLowerCase(),
-        );
+          const matched = logs.filter(
+            (l) =>
+              l.args.messageId &&
+              l.args.messageId.toLowerCase() === messageId.toLowerCase(),
+          );
 
-        return matched[matched.length - 1];
-      })().catch(() => undefined)
+          return matched[matched.length - 1];
+        })().catch(() => undefined)
+      : undefined;
+
+  const receiveLog = routerExecutedLog ?? received;
+  const receiveConfirmations = receiveLog
+    ? confirmationsFromBlock({
+        latestBlock: toBlockBase,
+        blockNumber: receiveLog.blockNumber,
+      })
     : undefined;
+  const receiveFinal =
+    receiveConfirmations !== undefined &&
+    receiveConfirmations >= MIN_BASE_SEPOLIA_CONFIRMATIONS;
 
-  const receiveStageStatus: DepositStageStatus = routerExecutedLog || received
-    ? "ok"
+  const receiveStageStatus: DepositStageStatus = receiveLog
+    ? receiveFinal
+      ? "ok"
+      : "pending"
     : sendStageStatus === "bad"
       ? "bad"
-      : messageId
-        ? "pending"
-        : "unknown";
+      : !baseRpcOk
+        ? "unknown"
+        : messageId
+          ? "pending"
+          : "unknown";
+
+  const receivedConfirmations = received
+    ? confirmationsFromBlock({
+        latestBlock: toBlockBase,
+        blockNumber: received.blockNumber,
+      })
+    : undefined;
+  const receivedFinal =
+    receivedConfirmations !== undefined &&
+    receivedConfirmations >= MIN_BASE_SEPOLIA_CONFIRMATIONS;
 
   const destinationMintStatus: DepositStageStatus = received
-    ? "ok"
+    ? receivedFinal
+      ? "ok"
+      : "pending"
     : receiveStageStatus === "bad"
       ? "bad"
-      : "pending";
+      : !baseRpcOk
+        ? "unknown"
+        : receiveStageStatus === "unknown"
+          ? "unknown"
+          : "pending";
 
   const stages: DepositStage[] = [
     { id: "DepositReceived", status: "ok" },
@@ -245,27 +348,34 @@ export async function deriveDepositStatus(params: {
       status: reserveCheckStatus,
       reason: reserveState
         ? `reserveRatioBps=${reserveState.reserveRatioBps}`
-        : undefined,
+        : "Reserve API unavailable",
     },
     {
       id: "PolicyCheck",
       status: policyCheckStatus,
-      reason: policyDecision?.reason,
+      reason: policyDecision?.reason
+        ? policyDecision.reason
+        : policyAddress
+          ? "Policy API unavailable"
+          : undefined,
     },
     {
       id: "MintSepolia",
       status: mintStageStatus,
-      chain: mint ? "sepolia" : undefined,
+      chain: mint || issuerUsedDepositId ? "sepolia" : undefined,
       txHash: mint?.transactionHash,
       blockNumber: mint?.blockNumber,
-      confirmations: mint
-        ? confirmationsFromBlock({
-            latestBlock: toBlockSepolia,
-            blockNumber: mint.blockNumber,
-          })
-        : undefined,
+      confirmations: mintConfirmations,
       reason:
-        mintStageStatus === "bad" ? "Blocked by failed checks" : undefined,
+        mintStageStatus === "bad"
+          ? "Blocked by failed checks"
+          : mintStageStatus === "pending" && mint && !mintFinal
+            ? `Waiting for confirmations (${mintConfirmations?.toString() ?? "0"}/${MIN_SEPOLIA_CONFIRMATIONS.toString()})`
+            : issuerUsedDepositId && !mint
+              ? "DepositId already used (issuer contract state)"
+              : !sepoliaRpcOk
+                ? "Sepolia RPC unavailable"
+                : undefined,
     },
     {
       id: "CCIPSend",
@@ -273,15 +383,16 @@ export async function deriveDepositStatus(params: {
       chain: sent ? "sepolia" : undefined,
       txHash: sent?.transactionHash,
       blockNumber: sent?.blockNumber,
-      confirmations: sent
-        ? confirmationsFromBlock({
-            latestBlock: toBlockSepolia,
-            blockNumber: sent.blockNumber,
-          })
-        : undefined,
+      confirmations: sentConfirmations,
       messageId: sent?.args.messageId ?? params.messageIdHint,
       reason:
-        sendStageStatus === "bad" ? "Blocked by previous stage" : undefined,
+        sendStageStatus === "bad"
+          ? "Blocked by previous stage"
+          : sendStageStatus === "pending" && sent && !sentFinal
+            ? `Waiting for confirmations (${sentConfirmations?.toString() ?? "0"}/${MIN_SEPOLIA_CONFIRMATIONS.toString()})`
+            : !sepoliaRpcOk
+              ? "Sepolia RPC unavailable"
+              : undefined,
     },
     {
       id: "CCIPReceive",
@@ -289,19 +400,16 @@ export async function deriveDepositStatus(params: {
       chain: routerExecutedLog || received ? "baseSepolia" : undefined,
       txHash: routerExecutedLog?.transactionHash ?? received?.transactionHash,
       blockNumber: routerExecutedLog?.blockNumber ?? received?.blockNumber,
-      confirmations:
-        routerExecutedLog || received
-          ? confirmationsFromBlock({
-              latestBlock: toBlockBase,
-              blockNumber:
-                routerExecutedLog?.blockNumber ?? received?.blockNumber,
-            })
-          : undefined,
+      confirmations: receiveConfirmations,
       messageId: messageId,
       reason:
         receiveStageStatus === "bad"
           ? "Blocked by previous stage"
-          : undefined,
+          : receiveStageStatus === "pending" && receiveLog && !receiveFinal
+            ? `Waiting for confirmations (${receiveConfirmations?.toString() ?? "0"}/${MIN_BASE_SEPOLIA_CONFIRMATIONS.toString()})`
+            : !baseRpcOk
+              ? "Base Sepolia RPC unavailable"
+              : undefined,
     },
     {
       id: "DestinationMint",
@@ -309,19 +417,18 @@ export async function deriveDepositStatus(params: {
       chain: received ? "baseSepolia" : undefined,
       txHash: received?.transactionHash,
       blockNumber: received?.blockNumber,
-      confirmations: received
-        ? confirmationsFromBlock({
-            latestBlock: toBlockBase,
-            blockNumber: received.blockNumber,
-          })
-        : undefined,
+      confirmations: receivedConfirmations,
       messageId: received?.args.messageId ?? params.messageIdHint,
       reason:
         destinationMintStatus === "bad"
           ? "Blocked by previous stage"
-          : receiveStageStatus === "ok" && !received
-            ? "Router executed but receiver did not emit MessageReceived"
-            : undefined,
+          : destinationMintStatus === "pending" && received && !receivedFinal
+            ? `Waiting for confirmations (${receivedConfirmations?.toString() ?? "0"}/${MIN_BASE_SEPOLIA_CONFIRMATIONS.toString()})`
+            : !baseRpcOk
+              ? "Base Sepolia RPC unavailable"
+              : receiveStageStatus === "ok" && !received
+                ? "Router executed but receiver did not emit MessageReceived"
+                : undefined,
     },
   ];
 

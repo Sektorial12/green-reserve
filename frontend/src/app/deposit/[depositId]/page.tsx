@@ -4,6 +4,7 @@ import type { Hex } from "viem";
 import { useSearchParams } from "next/navigation";
 
 import { DepositStatusCard } from "@/components/DepositStatusCard";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { WalletConnectButton } from "@/components/WalletConnectButton";
 import { Container } from "@/components/ui/Container";
 import { InlineError } from "@/components/ui/InlineError";
@@ -48,13 +49,15 @@ export default function DepositDetailPage({
           {!isBytes32Hex(depositId) ? (
             <InlineError>Invalid depositId in URL.</InlineError>
           ) : (
-            <DepositStatusCard
-              initialDepositId={depositId}
-              initialMessageIdHint={messageIdHint}
-              autoCheck
-              autoRefresh
-              readOnly
-            />
+            <ErrorBoundary title="Deposit status widget failed">
+              <DepositStatusCard
+                initialDepositId={depositId}
+                initialMessageIdHint={messageIdHint}
+                autoCheck
+                autoRefresh
+                readOnly
+              />
+            </ErrorBoundary>
           )}
         </Container>
       </main>

@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { DepositStatusCard } from "@/components/DepositStatusCard";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { OnchainStatusCard } from "@/components/OnchainStatusCard";
 import { RecentDepositsCard } from "@/components/RecentDepositsCard";
 import { ReserveStatusCard } from "@/components/ReserveStatusCard";
@@ -40,10 +41,16 @@ export default function DashboardPage() {
       <main className="pb-16">
         <Container>
           <div className="space-y-6">
-            <ReserveStatusCard />
-            <OnchainStatusCard />
+            <ErrorBoundary title="Reserve widget failed">
+              <ReserveStatusCard />
+            </ErrorBoundary>
+            <ErrorBoundary title="On-chain status widget failed">
+              <OnchainStatusCard />
+            </ErrorBoundary>
             <RecentDepositsCard />
-            <DepositStatusCard />
+            <ErrorBoundary title="Deposit status widget failed">
+              <DepositStatusCard />
+            </ErrorBoundary>
           </div>
         </Container>
       </main>

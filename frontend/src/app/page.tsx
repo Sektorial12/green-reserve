@@ -1,4 +1,5 @@
 import { WalletConnectButton } from "@/components/WalletConnectButton";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReserveStatusCard } from "@/components/ReserveStatusCard";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Container } from "@/components/ui/Container";
@@ -59,7 +60,9 @@ export default function Home() {
           </Card>
 
           <div className="mt-6">
-            <ReserveStatusCard />
+            <ErrorBoundary title="Reserve widget failed">
+              <ReserveStatusCard />
+            </ErrorBoundary>
           </div>
         </Container>
       </main>

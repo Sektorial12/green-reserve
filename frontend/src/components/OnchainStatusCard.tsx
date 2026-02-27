@@ -34,6 +34,13 @@ export function OnchainStatusCard() {
     null,
   );
 
+  function safe<T>(promise: Promise<T>) {
+    return promise.then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+  }
+
   React.useEffect(() => {
     if (!address) return;
     setAddressInput((prev) => (prev ? prev : address));
@@ -48,24 +55,44 @@ export function OnchainStatusCard() {
     queryFn: async () => {
       if (!owner) throw new Error("Invalid address");
 
-      const [tokenA, tokenB, paused] = await Promise.all([
-        readErc20Balance({
-          chain: "sepolia",
-          tokenAddress: env.NEXT_PUBLIC_SEPOLIA_TOKEN_A_ADDRESS as Address,
-          owner,
-        }),
-        readErc20Balance({
-          chain: "baseSepolia",
-          tokenAddress: env.NEXT_PUBLIC_BASE_SEPOLIA_TOKEN_B_ADDRESS as Address,
-          owner,
-        }),
-        readIssuerPaused(),
+      const [tokenAResult, tokenBResult, pausedResult] = await Promise.all([
+        safe(
+          readErc20Balance({
+            chain: "sepolia",
+            tokenAddress: env.NEXT_PUBLIC_SEPOLIA_TOKEN_A_ADDRESS as Address,
+            owner,
+          }),
+        ),
+        safe(
+          readErc20Balance({
+            chain: "baseSepolia",
+            tokenAddress:
+              env.NEXT_PUBLIC_BASE_SEPOLIA_TOKEN_B_ADDRESS as Address,
+            owner,
+          }),
+        ),
+        safe(readIssuerPaused()),
       ]);
+
+      const tokenA = tokenAResult.ok ? tokenAResult.value : null;
+      const tokenB = tokenBResult.ok ? tokenBResult.value : null;
+      const paused = pausedResult.ok ? pausedResult.value : null;
+
+      const errors = {
+        tokenA: tokenAResult.ok ? null : "Failed to load TokenA balance.",
+        tokenB: tokenBResult.ok ? null : "Failed to load TokenB balance.",
+        paused: pausedResult.ok ? null : "Failed to load issuer pause state.",
+      };
+
+      if (!tokenA && !tokenB && paused === null) {
+        throw new Error("Failed to load on-chain data (RPC unavailable).");
+      }
 
       return {
         tokenA,
         tokenB,
         paused,
+        errors,
       };
     },
     refetchOnWindowFocus: false,
@@ -73,10 +100,16 @@ export function OnchainStatusCard() {
   });
 
   const issuerStatus = onchainQuery.data
-    ? onchainQuery.data.paused
-      ? bad("Paused")
-      : ok("Active")
+    ? onchainQuery.data.paused === null
+      ? pending("Unknown")
+      : onchainQuery.data.paused
+        ? bad("Paused")
+        : ok("Active")
     : pending("Unknown");
+
+  const partialErrors = onchainQuery.data
+    ? Object.values(onchainQuery.data.errors).filter(Boolean)
+    : [];
 
   const trimmedDepositId = depositIdInput.trim();
   const usedDepositIdQuery = useQuery({
@@ -181,6 +214,12 @@ export function OnchainStatusCard() {
           </div>
         ) : onchainQuery.data ? (
           <div className="mt-4 space-y-4">
+            {partialErrors.length > 0 ? (
+              <InlineError>
+                Some on-chain reads failed. Partial data may be shown.
+              </InlineError>
+            ) : null}
+
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="rounded-lg border border-border p-4">
                 <div className="text-xs text-muted-foreground">
@@ -189,12 +228,17 @@ export function OnchainStatusCard() {
                 <div className="mt-1 flex items-baseline gap-2">
                   <ChainIcon chain="sepolia" className="mr-1" />
                   <div className="font-mono text-sm">
-                    {onchainQuery.data.tokenA.formatted}
+                    {onchainQuery.data.tokenA?.formatted ?? "—"}
                   </div>
                   <div className="text-sm font-medium">
-                    {onchainQuery.data.tokenA.info.symbol}
+                    {onchainQuery.data.tokenA?.info.symbol ?? "—"}
                   </div>
                 </div>
+                {onchainQuery.data.errors.tokenA ? (
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    {onchainQuery.data.errors.tokenA}
+                  </div>
+                ) : null}
               </div>
 
               <div className="rounded-lg border border-border p-4">
@@ -204,12 +248,17 @@ export function OnchainStatusCard() {
                 <div className="mt-1 flex items-baseline gap-2">
                   <ChainIcon chain="baseSepolia" className="mr-1" />
                   <div className="font-mono text-sm">
-                    {onchainQuery.data.tokenB.formatted}
+                    {onchainQuery.data.tokenB?.formatted ?? "—"}
                   </div>
                   <div className="text-sm font-medium">
-                    {onchainQuery.data.tokenB.info.symbol}
+                    {onchainQuery.data.tokenB?.info.symbol ?? "—"}
                   </div>
                 </div>
+                {onchainQuery.data.errors.tokenB ? (
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    {onchainQuery.data.errors.tokenB}
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
