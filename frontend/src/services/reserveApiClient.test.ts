@@ -25,7 +25,9 @@ describe("reserveApiClient", () => {
 
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(mockResponse({ ok: true, status: 200, json: { ok: true } }));
+      .mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: { ok: true } }),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const { reserveApi } = await import("@/services/reserveApiClient");
@@ -50,7 +52,9 @@ describe("reserveApiClient", () => {
 
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(mockResponse({ ok: true, status: 200, json: payload }));
+      .mockResolvedValue(
+        mockResponse({ ok: true, status: 200, json: payload }),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const { reserveApi } = await import("@/services/reserveApiClient");
@@ -70,7 +74,9 @@ describe("reserveApiClient", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(mockResponse({ ok: false, status: 503 }))
-      .mockResolvedValueOnce(mockResponse({ ok: true, status: 200, json: { ok: true } }));
+      .mockResolvedValueOnce(
+        mockResponse({ ok: true, status: 200, json: { ok: true } }),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const { reserveApi } = await import("@/services/reserveApiClient");
@@ -88,7 +94,9 @@ describe("reserveApiClient", () => {
     process.env.NEXT_PUBLIC_RESERVE_API_BASE_URL = "http://example.test";
     vi.resetModules();
 
-    const fetchMock = vi.fn().mockResolvedValue(mockResponse({ ok: false, status: 400 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ ok: false, status: 400 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const { reserveApi } = await import("@/services/reserveApiClient");

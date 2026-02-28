@@ -1,7 +1,4 @@
-"use client";
-
 import type { Hex } from "viem";
-import { useSearchParams } from "next/navigation";
 
 import { DepositStatusCard } from "@/components/DepositStatusCard";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -13,14 +10,24 @@ function isBytes32Hex(value: string): value is Hex {
   return /^0x[a-fA-F0-9]{64}$/.test(value);
 }
 
-export default function DepositDetailPage({
+export default async function DepositDetailPage({
   params,
+  searchParams,
 }: {
-  params: { depositId: string };
+  params: Promise<{ depositId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const searchParams = useSearchParams();
-  const depositId = decodeURIComponent(params.depositId);
-  const messageIdHint = searchParams.get("messageId")?.trim() ?? "";
+  const resolvedParams = await params;
+  const resolvedSearchParams: Record<string, string | string[] | undefined> =
+    await (searchParams ?? Promise.resolve({}));
+
+  const depositId = decodeURIComponent(
+    String(resolvedParams.depositId ?? ""),
+  ).trim();
+  const rawMessageIdHint = resolvedSearchParams["messageId"];
+  const messageIdHint =
+    typeof rawMessageIdHint === "string" ? rawMessageIdHint.trim() : "";
+  const showE2eDebug = process.env.NEXT_PUBLIC_E2E_TEST === "true";
 
   return (
     <div className="min-h-screen bg-background font-sans text-foreground">
@@ -47,7 +54,12 @@ export default function DepositDetailPage({
       <main className="pb-16">
         <Container>
           {!isBytes32Hex(depositId) ? (
-            <InlineError>Invalid depositId in URL.</InlineError>
+            <InlineError>
+              Invalid depositId in URL.
+              {showE2eDebug
+                ? ` ${JSON.stringify(depositId)} (len=${depositId.length})`
+                : null}
+            </InlineError>
           ) : (
             <ErrorBoundary title="Deposit status widget failed">
               <DepositStatusCard

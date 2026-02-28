@@ -15,6 +15,7 @@ import { InlineError } from "@/components/ui/InlineError";
 import { Input } from "@/components/ui/Input";
 import { useToast } from "@/components/ui/Toast";
 import { addRecentDepositId } from "@/lib/depositHistory";
+import { useE2eWallet } from "@/lib/e2eWallet";
 import { ok, pending } from "@/lib/status";
 
 function isBytes32Hex(value: string): value is Hex {
@@ -31,7 +32,12 @@ function bytes32FromRandom(): Hex {
 }
 
 export default function MintPage() {
-  const { isConnected, address } = useAccount();
+  const wagmiAccount = useAccount();
+  const e2eWallet = useE2eWallet();
+  const isConnected = e2eWallet.enabled
+    ? e2eWallet.isConnected
+    : wagmiAccount.isConnected;
+  const address = e2eWallet.enabled ? e2eWallet.address : wagmiAccount.address;
   const { toast } = useToast();
 
   const [toInput, setToInput] = React.useState("");

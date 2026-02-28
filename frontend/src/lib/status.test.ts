@@ -19,6 +19,9 @@ describe("status helpers", () => {
   });
 
   it("pending() returns default", () => {
-    expect(pending("Waiting")).toEqual({ variant: "default", label: "Waiting" });
+    expect(pending("Waiting")).toEqual({
+      variant: "default",
+      label: "Waiting",
+    });
   });
 });

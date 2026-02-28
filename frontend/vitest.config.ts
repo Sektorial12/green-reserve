@@ -13,7 +13,11 @@ export default defineConfig({
         },
         test: {
           environment: "node",
-          include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+          include: [
+            "src/**/*.test.ts",
+            "src/**/*.test.tsx",
+            "src/**/*.int.test.ts",
+          ],
           exclude: ["src/**/*.dom.test.ts"],
           clearMocks: true,
           mockReset: true,

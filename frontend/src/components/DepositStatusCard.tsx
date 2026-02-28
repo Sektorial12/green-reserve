@@ -13,6 +13,7 @@ import { InlineError } from "@/components/ui/InlineError";
 import { Input } from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
+import { isE2eTest } from "@/lib/e2e";
 import { env } from "@/lib/env";
 import { addRecentDepositId } from "@/lib/depositHistory";
 import { bad, ok, pending } from "@/lib/status";
@@ -268,6 +269,18 @@ export function DepositStatusCard({
     enabled: false,
     queryFn: async () => {
       if (!isBytes32Hex(trimmed)) throw new Error("Invalid depositId");
+      if (isE2eTest()) {
+        const url = new URL("/e2e/deposit-status", window.location.origin);
+        url.searchParams.set("depositId", trimmed);
+        if (messageIdHint) url.searchParams.set("messageIdHint", messageIdHint);
+
+        const res = await fetch(url.toString(), { method: "GET" });
+        if (!res.ok) {
+          throw new Error(`Request failed: ${res.status}`);
+        }
+        return (await res.json()) as DerivedDepositStatus;
+      }
+
       return deriveDepositStatus({ depositId: trimmed, messageIdHint });
     },
     retry: 1,
