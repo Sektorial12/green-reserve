@@ -1,12 +1,28 @@
 import Link from "next/link";
+import dynamic from "next/dynamic";
 
-import { DepositStatusCard } from "@/components/DepositStatusCard";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { OnchainStatusCard } from "@/components/OnchainStatusCard";
 import { RecentDepositsCard } from "@/components/RecentDepositsCard";
 import { ReserveStatusCard } from "@/components/ReserveStatusCard";
 import { WalletConnectButton } from "@/components/WalletConnectButton";
 import { Container } from "@/components/ui/Container";
+import { Skeleton } from "@/components/ui/Skeleton";
+
+const OnchainStatusCard = dynamic(
+  () =>
+    import("@/components/OnchainStatusCard").then((m) => m.OnchainStatusCard),
+  {
+    loading: () => <Skeleton className="h-[220px] w-full" />,
+  },
+);
+
+const DepositStatusCard = dynamic(
+  () =>
+    import("@/components/DepositStatusCard").then((m) => m.DepositStatusCard),
+  {
+    loading: () => <Skeleton className="h-[220px] w-full" />,
+  },
+);
 
 export default function DashboardPage() {
   return (

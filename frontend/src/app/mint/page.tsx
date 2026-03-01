@@ -103,10 +103,14 @@ export default function MintPage() {
               <CardContent>
                 <div className="space-y-4">
                   <div>
-                    <div className="text-xs text-muted-foreground">
+                    <label
+                      htmlFor="mint-to"
+                      className="text-xs text-muted-foreground"
+                    >
                       Destination address (Base Sepolia)
-                    </div>
+                    </label>
                     <Input
+                      id="mint-to"
                       value={toInput}
                       onChange={(e) => {
                         setToInput(e.target.value);
@@ -114,17 +118,29 @@ export default function MintPage() {
                       }}
                       placeholder="0x…"
                       className="font-mono"
+                      aria-invalid={toValid === false ? true : undefined}
+                      aria-describedby={
+                        toValid === false ? "mint-to-error" : undefined
+                      }
                     />
                     {toValid === false ? (
                       <div className="mt-2">
-                        <InlineError>Invalid address.</InlineError>
+                        <InlineError id="mint-to-error">
+                          Invalid address.
+                        </InlineError>
                       </div>
                     ) : null}
                   </div>
 
                   <div>
-                    <div className="text-xs text-muted-foreground">Amount</div>
+                    <label
+                      htmlFor="mint-amount"
+                      className="text-xs text-muted-foreground"
+                    >
+                      Amount
+                    </label>
                     <Input
+                      id="mint-amount"
                       value={amountInput}
                       onChange={(e) => {
                         setAmountInput(e.target.value);
@@ -132,19 +148,28 @@ export default function MintPage() {
                       }}
                       placeholder="100"
                       inputMode="decimal"
+                      aria-invalid={amountValid === false ? true : undefined}
+                      aria-describedby={
+                        amountValid === false ? "mint-amount-error" : undefined
+                      }
                     />
                     {amountValid === false ? (
                       <div className="mt-2">
-                        <InlineError>Enter a positive number.</InlineError>
+                        <InlineError id="mint-amount-error">
+                          Enter a positive number.
+                        </InlineError>
                       </div>
                     ) : null}
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between">
-                      <div className="text-xs text-muted-foreground">
+                      <label
+                        htmlFor="mint-depositId"
+                        className="text-xs text-muted-foreground"
+                      >
                         depositId (optional)
-                      </div>
+                      </label>
                       <Button
                         variant="secondary"
                         size="sm"
@@ -158,6 +183,7 @@ export default function MintPage() {
                       </Button>
                     </div>
                     <Input
+                      id="mint-depositId"
                       value={depositIdInput}
                       onChange={(e) => {
                         setDepositIdInput(e.target.value);
@@ -165,10 +191,16 @@ export default function MintPage() {
                       }}
                       placeholder="0x… (bytes32)"
                       className="font-mono"
+                      aria-invalid={depositIdValid === false ? true : undefined}
+                      aria-describedby={
+                        depositIdValid === false
+                          ? "mint-depositId-error"
+                          : undefined
+                      }
                     />
                     {depositIdValid === false ? (
                       <div className="mt-2">
-                        <InlineError>
+                        <InlineError id="mint-depositId-error">
                           depositId must be a 32-byte hex value (0x + 64 hex
                           chars).
                         </InlineError>

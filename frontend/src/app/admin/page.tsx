@@ -30,7 +30,7 @@ export default function AdminPage() {
   }, [address]);
 
   const reserveQuery = useQuery({
-    queryKey: ["admin", "reserveRaw"],
+    queryKey: ["reserveState"],
     queryFn: () => reserveApi.reserves(),
     refetchOnWindowFocus: false,
     retry: 1,
@@ -172,8 +172,15 @@ export default function AdminPage() {
               <CardContent>
                 <div className="space-y-3">
                   <div className="rounded-lg border border-border p-4">
+                    <label
+                      htmlFor="admin-allowlist-address"
+                      className="text-xs text-muted-foreground"
+                    >
+                      Address
+                    </label>
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                       <Input
+                        id="admin-allowlist-address"
                         value={addressInput}
                         onChange={(e) => {
                           setAddressInput(e.target.value);
@@ -185,6 +192,12 @@ export default function AdminPage() {
                             : "0x…"
                         }
                         className="font-mono"
+                        aria-invalid={addressError ? true : undefined}
+                        aria-describedby={
+                          addressError
+                            ? "admin-allowlist-address-error"
+                            : undefined
+                        }
                       />
                       <Button
                         variant="secondary"
@@ -206,7 +219,9 @@ export default function AdminPage() {
 
                     {addressError ? (
                       <div className="mt-2">
-                        <InlineError>{addressError}</InlineError>
+                        <InlineError id="admin-allowlist-address-error">
+                          {addressError}
+                        </InlineError>
                       </div>
                     ) : null}
                   </div>

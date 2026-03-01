@@ -426,7 +426,14 @@ export function DepositStatusCard({
 
       <CardContent>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <label
+            htmlFor="deposit-status-depositId"
+            className="text-xs text-muted-foreground"
+          >
+            depositId
+          </label>
           <Input
+            id="deposit-status-depositId"
             value={depositIdInput}
             onChange={(e) => {
               if (readOnly) return;
@@ -436,11 +443,22 @@ export function DepositStatusCard({
             placeholder="0x… (bytes32 depositId)"
             className="font-mono"
             disabled={readOnly}
+            aria-invalid={inputError ? true : undefined}
+            aria-describedby={
+              inputError ? "deposit-status-depositId-error" : undefined
+            }
           />
         </div>
 
         <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+          <label
+            htmlFor="deposit-status-messageIdHint"
+            className="text-xs text-muted-foreground"
+          >
+            messageId hint (optional)
+          </label>
           <Input
+            id="deposit-status-messageIdHint"
             value={messageIdHintInput}
             onChange={(e) => {
               setMessageIdHintInput(e.target.value);
@@ -449,18 +467,26 @@ export function DepositStatusCard({
             placeholder="0x… (optional messageId hint)"
             className="font-mono"
             disabled={readOnly}
+            aria-invalid={messageIdError ? true : undefined}
+            aria-describedby={
+              messageIdError ? "deposit-status-messageIdHint-error" : undefined
+            }
           />
         </div>
 
         {inputError ? (
           <div className="mt-3">
-            <InlineError>{inputError}</InlineError>
+            <InlineError id="deposit-status-depositId-error">
+              {inputError}
+            </InlineError>
           </div>
         ) : null}
 
         {messageIdError ? (
           <div className="mt-3">
-            <InlineError>{messageIdError}</InlineError>
+            <InlineError id="deposit-status-messageIdHint-error">
+              {messageIdError}
+            </InlineError>
           </div>
         ) : null}
 

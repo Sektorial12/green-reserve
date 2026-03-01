@@ -70,10 +70,16 @@ export function Toaster() {
   const { toasts, dismiss } = useToast();
 
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-full max-w-sm flex-col gap-2">
+    <div
+      className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-full max-w-sm flex-col gap-2"
+      role="region"
+      aria-label="Notifications"
+    >
       {toasts.map((t) => (
         <div
           key={t.id}
+          role={t.variant === "destructive" ? "alert" : "status"}
+          aria-live={t.variant === "destructive" ? "assertive" : "polite"}
           className={cn(
             "pointer-events-auto rounded-[var(--radius-lg)] border border-border bg-card p-4 text-card-foreground shadow-[var(--shadow-sm)]",
             t.variant === "destructive" &&

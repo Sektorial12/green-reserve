@@ -15,6 +15,10 @@
 /test-results/
 /playwright-report/
 
+# lighthouse (local runs)
+/.lighthouse-tmp/
+/C:*
+
 # next.js
 /.next/
 /out/

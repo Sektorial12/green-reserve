@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "e2e:server": "E2E_TEST=true NEXT_PUBLIC_E2E_TEST=true NEXT_PUBLIC_RESERVE_API_BASE_URL=http://127.0.0.1:3005/e2e npm run build && E2E_TEST=true NEXT_PUBLIC_E2E_TEST=true NEXT_PUBLIC_RESERVE_API_BASE_URL=http://127.0.0.1:3005/e2e npx next start -p 3005",
     "e2e": "playwright test",
-    "e2e:ui": "playwright test --ui"
+    "e2e:ui": "playwright test --ui",
+    "lighthouse:budget": "node scripts/run-lighthouse-budget.mjs"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.10",
@@ -36,6 +37,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "jsdom": "^26.1.0",
+    "lighthouse": "^12.8.2",
     "msw": "^2.11.2",
     "prettier": "^3.8.1",
     "tailwindcss": "^4",

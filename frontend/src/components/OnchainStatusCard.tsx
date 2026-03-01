@@ -150,9 +150,15 @@ export function OnchainStatusCard() {
 
       <CardContent>
         <div className="rounded-lg border border-border p-4">
-          <div className="text-xs text-muted-foreground">Address</div>
+          <label
+            htmlFor="onchain-status-address"
+            className="text-xs text-muted-foreground"
+          >
+            Address
+          </label>
           <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
             <Input
+              id="onchain-status-address"
               value={addressInput}
               onChange={(e) => {
                 setAddressInput(e.target.value);
@@ -162,6 +168,10 @@ export function OnchainStatusCard() {
                 address ? "0x… (defaults to connected wallet)" : "0x…"
               }
               className="font-mono"
+              aria-invalid={addressError ? true : undefined}
+              aria-describedby={
+                addressError ? "onchain-status-address-error" : undefined
+              }
             />
             <Button
               variant="secondary"
@@ -183,7 +193,9 @@ export function OnchainStatusCard() {
 
           {addressError ? (
             <div className="mt-2">
-              <InlineError>{addressError}</InlineError>
+              <InlineError id="onchain-status-address-error">
+                {addressError}
+              </InlineError>
             </div>
           ) : null}
         </div>
@@ -269,12 +281,16 @@ export function OnchainStatusCard() {
         )}
 
         <div className="mt-4 rounded-lg border border-border p-4">
-          <div className="text-xs text-muted-foreground">
+          <label
+            htmlFor="onchain-status-depositId"
+            className="text-xs text-muted-foreground"
+          >
             Deposit ID used check (issuer)
-          </div>
+          </label>
 
           <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
             <Input
+              id="onchain-status-depositId"
               value={depositIdInput}
               onChange={(e) => {
                 setDepositIdInput(e.target.value);
@@ -282,6 +298,10 @@ export function OnchainStatusCard() {
               }}
               placeholder="0x… (bytes32 depositId)"
               className="font-mono"
+              aria-invalid={depositIdError ? true : undefined}
+              aria-describedby={
+                depositIdError ? "onchain-status-depositId-error" : undefined
+              }
             />
             <Button
               variant="secondary"
@@ -305,7 +325,9 @@ export function OnchainStatusCard() {
 
           {depositIdError ? (
             <div className="mt-2">
-              <InlineError>{depositIdError}</InlineError>
+              <InlineError id="onchain-status-depositId-error">
+                {depositIdError}
+              </InlineError>
             </div>
           ) : null}
 
