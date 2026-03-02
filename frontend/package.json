@@ -20,8 +20,10 @@
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.10",
+    "@sentry/nextjs": "^10.41.0",
     "@tanstack/react-query": "^5.90.21",
     "next": "16.1.6",
+    "posthog-js": "^1.357.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "viem": "^2.46.3",

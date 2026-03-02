@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import * as Sentry from "@sentry/nextjs";
 
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
@@ -25,8 +26,19 @@ export class ErrorBoundary extends React.Component<
     return { error };
   }
 
-  componentDidCatch(error: Error) {
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error(error);
+
+    Sentry.withScope((scope) => {
+      scope.setTag("source", "ErrorBoundary");
+      if (this.props.title) scope.setExtra("title", this.props.title);
+      if (this.props.description)
+        scope.setExtra("description", this.props.description);
+      if (errorInfo.componentStack)
+        scope.setExtra("componentStack", errorInfo.componentStack);
+      if (typeof window !== "undefined") scope.setExtra("url", window.location.href);
+      Sentry.captureException(error);
+    });
   }
 
   private reset = () => {

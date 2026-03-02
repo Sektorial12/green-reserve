@@ -15,6 +15,7 @@ import { InlineError } from "@/components/ui/InlineError";
 import { Input } from "@/components/ui/Input";
 import { useToast } from "@/components/ui/Toast";
 import { addRecentDepositId } from "@/lib/depositHistory";
+import { trackEvent } from "@/lib/analytics";
 import { useE2eWallet } from "@/lib/e2eWallet";
 import { ok, pending } from "@/lib/status";
 
@@ -175,6 +176,7 @@ export default function MintPage() {
                         size="sm"
                         onClick={() => {
                           if (typeof crypto === "undefined") return;
+                          trackEvent("deposit_intent_deposit_id_generated");
                           setDepositIdInput(bytes32FromRandom());
                           setError(null);
                         }}
@@ -213,12 +215,31 @@ export default function MintPage() {
                   <Button
                     variant="primary"
                     onClick={() => {
+                      trackEvent("deposit_intent_preview_click", {
+                        isConnected,
+                        hasAddress: Boolean(address),
+                        hasTo: Boolean(toTrimmed),
+                        toValid,
+                        hasAmount: Boolean(amountInput),
+                        amountValid,
+                        hasDepositId: Boolean(depositIdTrimmed),
+                        depositIdValid,
+                      });
+
                       if (!isConnected || !address) {
+                        trackEvent("deposit_intent_preview_blocked", {
+                          reason: "wallet_not_connected",
+                        });
                         setError("Connect your wallet to continue.");
                         return;
                       }
 
                       if (!canPreview) {
+                        trackEvent("deposit_intent_preview_blocked", {
+                          reason: "invalid_to_or_amount",
+                          toValid,
+                          amountValid,
+                        });
                         setError(
                           "Enter a valid destination address and amount.",
                         );
@@ -226,11 +247,17 @@ export default function MintPage() {
                       }
 
                       if (depositIdTrimmed && !depositIdValid) {
+                        trackEvent("deposit_intent_preview_blocked", {
+                          reason: "invalid_deposit_id",
+                        });
                         setError("Fix the depositId or leave it blank.");
                         return;
                       }
 
                       if (typeof crypto === "undefined") {
+                        trackEvent("deposit_intent_preview_blocked", {
+                          reason: "crypto_unavailable",
+                        });
                         setError("Your browser does not support crypto APIs.");
                         return;
                       }
@@ -238,6 +265,14 @@ export default function MintPage() {
                       const depositId = depositIdTrimmed
                         ? (depositIdTrimmed as Hex)
                         : bytes32FromRandom();
+
+                      trackEvent("deposit_intent_preview_success", {
+                        depositId,
+                        walletAddress: address,
+                        to: toTrimmed,
+                        amount: amountInput,
+                        usedProvidedDepositId: Boolean(depositIdTrimmed),
+                      });
 
                       addRecentDepositId(depositId);
                       toast({

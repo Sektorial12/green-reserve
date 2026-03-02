@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
+import * as Sentry from "@sentry/nextjs";
 
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
@@ -18,6 +19,13 @@ export default function ErrorPage({
 
   React.useEffect(() => {
     console.error(error);
+
+    Sentry.withScope((scope) => {
+      scope.setTag("source", "app/error.tsx");
+      scope.setExtra("digest", error.digest);
+      if (typeof window !== "undefined") scope.setExtra("url", window.location.href);
+      Sentry.captureException(error);
+    });
   }, [error]);
 
   return (

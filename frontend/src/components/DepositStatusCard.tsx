@@ -16,6 +16,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { isE2eTest } from "@/lib/e2e";
 import { env } from "@/lib/env";
 import { addRecentDepositId } from "@/lib/depositHistory";
+import { trackEvent } from "@/lib/analytics";
 import { bad, ok, pending } from "@/lib/status";
 import {
   deriveDepositStatus,
@@ -288,9 +289,27 @@ export function DepositStatusCard({
     refetchOnWindowFocus: false,
   });
 
+  const lastErrorRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!query.error) {
+      lastErrorRef.current = null;
+      return;
+    }
+
+    const message = query.error instanceof Error ? query.error.message : "error";
+    if (lastErrorRef.current === message) return;
+    lastErrorRef.current = message;
+
+    trackEvent("deposit_status_fetch_error", {
+      depositId: isBytes32Hex(trimmed) ? trimmed : undefined,
+      message: message.slice(0, 200),
+    });
+  }, [query.error, trimmed]);
+
   React.useEffect(() => {
     if (!autoCheck) return;
     if (!isBytes32Hex(trimmed)) return;
+    trackEvent("deposit_status_auto_check", { depositId: trimmed });
     void query.refetch();
   }, [autoCheck, trimmed, trimmedMessageIdHint, query]);
 
@@ -298,6 +317,16 @@ export function DepositStatusCard({
     (s) => s.id === "DestinationMint",
   );
   const isTerminal = terminalStage?.status === "ok";
+
+  const terminalTrackedRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!isTerminal) return;
+    if (!isBytes32Hex(trimmed)) return;
+    if (terminalTrackedRef.current === trimmed) return;
+    terminalTrackedRef.current = trimmed;
+
+    trackEvent("deposit_status_terminal_ok", { depositId: trimmed });
+  }, [isTerminal, trimmed]);
 
   React.useEffect(() => {
     if (!autoRefreshEnabled) return;
@@ -342,6 +371,63 @@ export function DepositStatusCard({
   const manualRefreshCooldownMs = 3_000;
   const refreshDisabled = query.isFetching || cooldownActive;
 
+  const exportReport = React.useCallback(() => {
+    const generatedAt = new Date().toISOString();
+    const depositId = depositIdInput.trim();
+    const messageIdHintValue = messageIdHintInput.trim();
+
+    const errorMessage =
+      query.error instanceof Error ? query.error.message : query.error ? "error" : null;
+
+    const report = {
+      generatedAt,
+      depositId,
+      messageIdHint: messageIdHintValue || null,
+      config: {
+        reserveApiBaseUrl: env.NEXT_PUBLIC_RESERVE_API_BASE_URL,
+        ccipExplorerBaseUrl: env.NEXT_PUBLIC_CCIP_EXPLORER_BASE_URL,
+      },
+      ui: {
+        autoRefreshEnabled,
+        pollAttempt,
+        pollStartedAt,
+      },
+      result: {
+        data: query.data ?? null,
+        error: errorMessage,
+      },
+    };
+
+    const json = JSON.stringify(
+      report,
+      (_key, value) => (typeof value === "bigint" ? value.toString() : value),
+      2,
+    );
+
+    const safeDepositId = isBytes32Hex(depositId) ? depositId.slice(0, 10) : "unknown";
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `deposit-report-${safeDepositId}-${Date.now()}.json`;
+    a.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    trackEvent("deposit_report_export", {
+      depositId: isBytes32Hex(depositId) ? depositId : undefined,
+      hasData: Boolean(query.data),
+      hasError: Boolean(query.error),
+    });
+  }, [
+    autoRefreshEnabled,
+    depositIdInput,
+    messageIdHintInput,
+    pollAttempt,
+    pollStartedAt,
+    query.data,
+    query.error,
+  ]);
+
   React.useEffect(() => {
     return () => {
       if (cooldownTimerRef.current !== null) {
@@ -369,6 +455,10 @@ export function DepositStatusCard({
             variant="secondary"
             size="sm"
             onClick={() => {
+              trackEvent("deposit_status_auto_refresh_toggle", {
+                enabled: !autoRefreshEnabled,
+                depositId: isBytes32Hex(trimmed) ? trimmed : undefined,
+              });
               setAutoRefreshEnabled((v) => !v);
               setPollAttempt(0);
               setPollStartedAt(null);
@@ -378,11 +468,21 @@ export function DepositStatusCard({
             Auto: {autoRefreshEnabled ? "On" : "Off"}
           </Button>
           <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => exportReport()}
+          >
+            Export JSON
+          </Button>
+          <Button
             variant="outline"
             size="sm"
             onClick={async () => {
               const value = depositIdInput.trim();
               if (!isBytes32Hex(value)) {
+                trackEvent("deposit_status_refresh_blocked", {
+                  reason: "invalid_deposit_id",
+                });
                 setInputError(
                   "depositId must be a 32-byte hex value (0x + 64 hex chars).",
                 );
@@ -391,11 +491,20 @@ export function DepositStatusCard({
 
               const msgValue = messageIdHintInput.trim();
               if (msgValue && !isBytes32Hex(msgValue)) {
+                trackEvent("deposit_status_refresh_blocked", {
+                  reason: "invalid_message_id_hint",
+                  depositId: value,
+                });
                 setMessageIdError(
                   "messageId must be a 32-byte hex value (0x + 64 hex chars).",
                 );
                 return;
               }
+
+              trackEvent("deposit_status_refresh_click", {
+                depositId: value,
+                hasMessageIdHint: Boolean(msgValue),
+              });
 
               setInputError(null);
               setMessageIdError(null);
@@ -411,7 +520,15 @@ export function DepositStatusCard({
                 setCooldownActive(false);
               }, manualRefreshCooldownMs);
 
-              await query.refetch();
+              const res = await query.refetch();
+              trackEvent("deposit_status_refresh_result", {
+                depositId: value,
+                ok: Boolean(res.data) && !res.error,
+                hasError: Boolean(res.error),
+                isTerminal:
+                  res.data?.stages.find((s) => s.id === "DestinationMint")
+                    ?.status === "ok",
+              });
             }}
             disabled={refreshDisabled}
           >
@@ -502,7 +619,12 @@ export function DepositStatusCard({
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => query.refetch()}
+              onClick={() => {
+                trackEvent("deposit_status_retry_click", {
+                  depositId: isBytes32Hex(trimmed) ? trimmed : undefined,
+                });
+                query.refetch();
+              }}
               disabled={query.isFetching}
             >
               Retry
