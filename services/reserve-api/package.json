@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "viem": "^2.23.2"
+  },
   "scripts": {
+    "attest": "bun src/attest.ts",
     "dev": "bun --hot src/index.ts",
     "start": "bun src/index.ts"
   },

@@ -5,6 +5,8 @@ dist/
 **/dist/
 .DS_Store
 
+**/live-roadmap.md
+
 roadmap-v2.md
 
 # Foundry

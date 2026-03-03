@@ -8,6 +8,14 @@ CONFIG_FILE="${CONFIG_FILE:-./workflows/greenreserve-workflow/config.staging.jso
 
 SEPOLIA_RPC="${SEPOLIA_RPC:-https://ethereum-sepolia-rpc.publicnode.com}"
 BASE_RPC="${BASE_RPC:-https://sepolia.base.org}"
+RESERVE_API_BASE_URL="${RESERVE_API_BASE_URL:-http://localhost:8788}"
+
+ENV_FILE="$REPO_ROOT/.env"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required"
@@ -22,7 +30,20 @@ fi
 cd "$REPO_ROOT"
 
 DEPOSIT_ID="${DEPOSIT_ID:-$(jq -r .depositId "$PAYLOAD_FILE")}"
-TO="$(jq -r .to "$PAYLOAD_FILE")"
+TO="$(jq -r '.to // empty' "$PAYLOAD_FILE")"
+
+if [[ ! "$DEPOSIT_ID" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+  echo "invalid depositId: $DEPOSIT_ID"
+  exit 1
+fi
+
+if [[ -z "${TO:-}" || "$TO" == "null" ]]; then
+  if command -v curl >/dev/null 2>&1; then
+    if DEPOSIT_JSON="$(curl -sf "$RESERVE_API_BASE_URL/deposits?depositId=$DEPOSIT_ID")"; then
+      TO="$(echo "$DEPOSIT_JSON" | jq -r '.notice.onchain.to // empty')"
+    fi
+  fi
+fi
 
 ISSUER="$(jq -r .sepoliaIssuerAddress "$CONFIG_FILE")"
 RECEIVER="$(jq -r .baseSepoliaReceiverAddress "$CONFIG_FILE")"
@@ -47,6 +68,11 @@ echo "processedDepositId=$PROCESSED"
 if [[ "$PROCESSED" == "true" ]]; then
   echo
   echo "[base] tokenB=$TOKENB"
-  BAL=$(cast call "$TOKENB" "balanceOf(address)(uint256)" "$TO" --rpc-url "$BASE_RPC")
-  echo "tokenBBalance=$BAL"
+  if [[ -z "${TO:-}" || ! "$TO" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+    echo "warning: missing/invalid to address; cannot check TokenB balance"
+    echo "hint: run reserve-api and ensure /deposits?depositId=... returns notice.onchain.to"
+  else
+    BAL=$(cast call "$TOKENB" "balanceOf(address)(uint256)" "$TO" --rpc-url "$BASE_RPC")
+    echo "tokenBBalance=$BAL"
+  fi
 fi

@@ -4,6 +4,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API_DIR="$REPO_ROOT/services/reserve-api"
 
+ENV_FILE="$API_DIR/.env"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+
 if ! command -v bun >/dev/null 2>&1; then
   echo "bun is required"
   exit 1

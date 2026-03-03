@@ -44,8 +44,8 @@ type Config = z.infer<typeof configSchema>
 
 const depositSchema = z.object({
   depositId: z.string(),
-  to: z.string(),
-  amount: z.string(),
+  to: z.string().optional(),
+  amount: z.string().optional(),
   scenario: z.enum(["healthy", "unhealthy"]).optional(),
 })
 
@@ -568,23 +568,83 @@ const writeSenderSend = (runtime: Runtime<Config>, senderWriteReceiverAddress: A
 
 const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => {
   const deposit = parseDepositPayload(triggerOutput)
-  runtime.log(`depositId=${deposit.depositId} to=${deposit.to} amount=${deposit.amount}`)
-
   const http = new cre.capabilities.HTTPClient()
   const baseUrl = runtime.config.reserveApiBaseUrl.replace(/\/$/, "")
-  const scenario = deposit.scenario ?? "healthy"
+
+  let to = deposit.to
+  let amountWei = deposit.amount
+
+  if (!to || !amountWei) {
+    const depText = http
+      .sendRequest(
+        runtime,
+        fetchJsonText(`${baseUrl}/deposits?depositId=${encodeURIComponent(deposit.depositId)}`),
+        consensusIdenticalAggregation()
+      )()
+      .result()
+
+    const dep = JSON.parse(depText) as any
+    to = dep?.notice?.onchain?.to
+    amountWei = dep?.notice?.amountWei
+
+    if (typeof to !== "string" || typeof amountWei !== "string") {
+      runtime.log("blocked: reason=deposit_notice_missing")
+      return "blocked"
+    }
+  }
+
+  runtime.log(`depositId=${deposit.depositId} to=${to} amount=${amountWei}`)
 
   const reservesText = http
-    .sendRequest(runtime, fetchJsonText(`${baseUrl}/reserves?scenario=${scenario}`), consensusIdenticalAggregation())()
+    .sendRequest(runtime, fetchJsonText(`${baseUrl}/reserves`), consensusIdenticalAggregation())()
     .result()
   const reserves = JSON.parse(reservesText) as {
     reserveRatioBps: string
+    auditor?: string
+    proofRef?: string
+    messageHash?: string
+  }
+
+  if (reserves.auditor || reserves.proofRef || reserves.messageHash) {
+    runtime.log(
+      `reserves_evidence auditor=${reserves.auditor ?? ""} proofRef=${reserves.proofRef ?? ""} messageHash=${reserves.messageHash ?? ""}`
+    )
   }
 
   const kycText = http
-    .sendRequest(runtime, fetchJsonText(`${baseUrl}/policy/kyc?address=${deposit.to}`), consensusIdenticalAggregation())()
+    .sendRequest(runtime, fetchJsonText(`${baseUrl}/policy/kyc?address=${to}`), consensusIdenticalAggregation())()
     .result()
   const kyc = JSON.parse(kycText) as { isAllowed: boolean; reason: string }
+
+  let ai: null | {
+    memo: { riskScore: number; confidence: number; decision: string; reasons: string[] }
+    memoSha256: string
+    inputSha256: string
+    model: string
+  } = null
+  try {
+    const aiUrl = `${baseUrl}/ai/risk-memo?depositId=${encodeURIComponent(deposit.depositId)}&to=${encodeURIComponent(
+      to
+    )}&amount=${encodeURIComponent(amountWei)}&reserveRatioBps=${encodeURIComponent(
+      reserves.reserveRatioBps
+    )}&kycAllowed=${encodeURIComponent(String(kyc.isAllowed))}&kycReason=${encodeURIComponent(kyc.reason ?? "")}`
+
+    const aiText = http
+      .sendRequest(runtime, fetchJsonText(aiUrl), consensusIdenticalAggregation())()
+      .result()
+    const parsed = JSON.parse(aiText) as any
+    if (parsed && parsed.ok && parsed.memo && parsed.memoSha256) {
+      ai = {
+        memo: parsed.memo,
+        memoSha256: parsed.memoSha256,
+        inputSha256: parsed.inputSha256 ?? "",
+        model: parsed.model ?? "",
+      }
+    }
+  } catch (e) {
+    runtime.log(`ai_risk_memo_error=${(e as Error).message}`)
+    return "blocked"
+  }
 
   const reserveRatioBps = BigInt(reserves.reserveRatioBps)
   const isHealthy = reserveRatioBps >= 10_000n
@@ -595,6 +655,20 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
   if (!kyc.isAllowed) {
     runtime.log(`blocked: reason=${kyc.reason}`)
     return "blocked"
+  }
+
+  if (ai?.memo) {
+    runtime.log(
+      `ai_risk decision=${ai.memo.decision} riskScore=${ai.memo.riskScore} confidence=${ai.memo.confidence} memoSha256=${ai.memoSha256} model=${ai.model}`
+    )
+    if (ai.memo.decision === "reject") {
+      runtime.log("blocked: reason=ai_reject")
+      return "blocked"
+    }
+    if (ai.memo.decision === "manual_review") {
+      runtime.log("manual_review_required")
+      return "manual_review_required"
+    }
   }
 
   if (!isHealthy) {
@@ -620,8 +694,8 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
   const mintReply = writeIssuerMint(
     runtime,
     issuerWriteReceiverAddress as Address,
-    deposit.to as Address,
-    BigInt(deposit.amount),
+    to as Address,
+    BigInt(amountWei),
     deposit.depositId as `0x${string}`
   )
 

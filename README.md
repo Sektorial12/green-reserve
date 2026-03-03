@@ -8,6 +8,10 @@ The core idea:
 - It performs **onchain reads/writes** on **Ethereum Sepolia**
 - It sends a **CCIP message** to **Base Sepolia** (destination chain)
 
+## Status
+
+This repository is intended as a developer-facing reference implementation and demo environment.
+
 
 ## High-level architecture
 
@@ -29,7 +33,6 @@ The core idea:
     - `GreenReserveReceiver`
 
 - **CRE workflow (TypeScript → WASM)**
-  - Path: `workflows/greenreserve-workflow/main.ts`
   - Trigger: HTTP
   - Current behavior:
     - Parse deposit payload
@@ -79,108 +82,106 @@ These are also recorded in:
 - `project.yaml`
   - CRE RPC configuration per target
 
-## Phase 8 — Demo packaging
+## Quickstart (local)
 
-### One-command demo steps
+GreenReserve has multiple components. For most local development and frontend testing you will typically run:
 
-In separate terminals:
+- The deterministic Reserve/Compliance API (Bun)
+- The frontend (Next.js)
 
-Terminal A (external system):
+### Prerequisites
 
-```bash
-./scripts/demo-start-reserve-api.sh
-```
+- **Node.js + npm** (frontend)
+- **Bun** (Reserve/Compliance API)
 
-Terminal B (allowlisted happy path, onchain):
+Optional (for deeper development):
 
-```bash
-./scripts/demo-allowlisted.sh
-```
+- **Foundry** (smart contracts)
+- **CRE CLI** (`cre`) for workflow simulation/broadcast
 
-Terminal C (blocked address negative path):
+## Frontend (Next.js)
 
-```bash
-./scripts/demo-blocked.sh
-```
-
-Terminal D (insufficient reserves negative path):
+### 1) Install dependencies
 
 ```bash
-./scripts/demo-insufficient-reserves.sh
+cd frontend
+npm install
 ```
 
-### Chainlink Usage Index
+### 2) Configure environment variables
 
-CRE (workflow + EVM/HTTP capabilities):
-- `workflows/greenreserve-workflow/main.ts`
-- `workflows/greenreserve-workflow/workflow.yaml`
-- `project.yaml`
-
-CCIP (contracts):
-- `contracts/src/GreenReserveCCIPSender.sol`
-- `contracts/src/GreenReserveReceiver.sol`
-- `contracts/lib/ccip-contracts/` (vendored dependency)
-
-CRE EVM write receiver integration (forwarder adapters):
-- `contracts/src/CREReportReceiverAdapter.sol`
-- `contracts/script/DeploySepoliaAdapters.s.sol`
-
-### Evidence checklist
-
-- Record CLI output from `./scripts/demo-allowlisted.sh` showing non-empty tx hashes.
-- Screenshot `./scripts/verify.sh` output showing `processedDepositId=true` and `tokenBBalance` increased.
-- Record a negative path run (`./scripts/demo-blocked.sh` or `./scripts/demo-insufficient-reserves.sh`).
-
-## Prerequisites
-
-- **Bun** (for workflow compilation + reserve-api)
-- **Foundry** (for contracts)
-- **CRE CLI** (`cre`) installed and available on your `PATH`
-
-## One-time setup (after clone)
-
-### 1) Install Foundry dependencies
-
-This repo uses Foundry git deps under `contracts/lib/`, but **we do not commit** `contracts/lib/` to git (lean repo). You must install them locally:
+Copy the example env file:
 
 ```bash
-cd contracts
-forge install OpenZeppelin/openzeppelin-contracts@v5.0.2 --no-commit
-forge install cyfrin/ccip-contracts@1.4.0 --no-commit
+cp .env.example .env.local
 ```
 
-Then verify:
+Minimum recommended settings for local dev:
+
+- `NEXT_PUBLIC_RESERVE_API_BASE_URL=http://127.0.0.1:8788`
+
+If you want to test real wallet connections, you will typically need:
+
+- `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=...`
+
+Optional observability:
+
+- `NEXT_PUBLIC_SENTRY_DSN=`
+- `NEXT_PUBLIC_POSTHOG_KEY=`
+
+### 3) Start dev server
 
 ```bash
-forge build
+npm run dev
 ```
 
-### 2) Install Bun dependencies
+Open:
 
-Reserve API:
+- `http://localhost:3000`
+
+### Common commands
+
+```bash
+npm run lint
+npm run build
+npm test
+```
+
+### E2E tests (Playwright)
+
+Start an E2E production server (build + start on port `3005` with E2E flags enabled):
+
+```bash
+npm run e2e:server
+```
+
+Then in a second terminal:
+
+```bash
+npm run e2e
+```
+
+UI mode:
+
+```bash
+npm run e2e:ui
+```
+
+### Lighthouse performance budget
+
+```bash
+npm run lighthouse:budget
+```
+
+## Reserve/Compliance API (Bun)
+
+### Install and run
 
 ```bash
 cd services/reserve-api
 bun install
-```
-
-Workflow:
-
-```bash
-cd workflows/greenreserve-workflow
-bun install
-```
-
-## Run the deterministic Reserve/Compliance API
-
-```bash
-cd services/reserve-api
 bun run dev
 ```
-
-Defaults (see `services/reserve-api/.env.example`):
-- `PORT=8788`
-- `RESERVES_ASOF_TIMESTAMP=1700000000`
 
 Quick checks:
 
@@ -190,172 +191,32 @@ curl "http://127.0.0.1:8788/reserves?scenario=healthy"
 curl "http://127.0.0.1:8788/policy/kyc?address=0x0000000000000000000000000000000000000002"
 ```
 
-## CRE workflow simulation (dry-run)
+## Smart contracts (Foundry)
 
-The workflow folder is `workflows/greenreserve-workflow/`.
-
-The CLI expects a folder path:
-
-```bash
-cre workflow simulate ./workflows/greenreserve-workflow \
-  -R . \
-  -T staging-settings \
-  --trigger-index 0 \
-  --http-payload @./workflows/greenreserve-workflow/payloads/deposit-allowlisted.json
-```
-
-Other payload fixtures:
-- `payloads/deposit-blocked.json`
-- `payloads/deposit-insufficient-reserves.json`
-
-Phase 7 scripts (recommended):
-
-```bash
-./scripts/dry-run.sh
-```
-
-## CRE workflow simulation (broadcast)
-
-When the workflow starts writing to the EVM (mint + CCIP send), you will run simulation with `--broadcast`.
-
-Create `code/.env` (this file is gitignored) with a funded key:
-
-```bash
-CRE_ETH_PRIVATE_KEY=0x...
-```
-
-Then:
-
-```bash
-cre workflow simulate ./workflows/greenreserve-workflow \
-  -R . \
-  -T staging-settings \
-  --trigger-index 0 \
-  --http-payload @./workflows/greenreserve-workflow/payloads/deposit-allowlisted.json \
-  --broadcast
-```
-
-Phase 7 scripts (recommended):
-
-```bash
-./scripts/broadcast.sh
-```
-
-If you need more verbose debugging:
-
-```bash
-./scripts/broadcast-engine-logs.sh
-```
-
-After broadcast, verify onchain outcomes:
-
-```bash
-./scripts/verify.sh
-```
-
-CCIP delivery is asynchronous. If `processedDepositId=false` immediately after broadcast, wait a bit and run `./scripts/verify.sh` again.
-
-Notes:
-- `sepoliaWriteGasLimit` (in `workflows/greenreserve-workflow/config.staging.json`) controls the gas limit used for CRE EVM `writeReport` transactions. This matters because the forwarder executes the adapter and then the target contract logic (including the nested CCIP send).
-- CCIP execution on Base Sepolia is asynchronous. A successful Sepolia send only proves the message was accepted for routing; the destination chain state may update a bit later.
-- The workflow prints diagnostic logs after a successful send to help track delivery:
-  - `ccip_sender_config ...` (onchain sender config: router, destination chain selector, destination receiver, operator, gas limit)
-  - `ccip_messageId_from_receipt=...` (or `ccip_messageId_from_scan=...` fallback)
-  - `base_messageReceived ...` (destination receiver event)
-  - `base_routerMessageExecuted ...` (destination router execution evidence)
-
-Note: the Sepolia CCIP sender contract pays CCIP fees from its own ETH balance. Before running `--broadcast`, make sure the deployed `GreenReserveCCIPSender` address is funded with some Sepolia ETH.
-
-For this demo, CCIP fees are paid in **native gas** (Sepolia ETH) because `GreenReserveCCIPSender` uses `feeToken = address(0)`. You do not need testnet LINK or CCIP test tokens for the message-only path implemented here.
-
-## Contract deployment (Foundry)
-
-### Environment variables
-
-See `contracts/.env.example`:
-- `PRIVATE_KEY` (deployer)
-- `BASE_RECEIVER` (used when deploying Sepolia sender/issuer)
-- `WORKFLOW_OPERATOR` (optional; set Issuer/Sender operator to the CRE workflow signer address)
-- `SEPOLIA_SENDER` (used when allowlisting sender on Base Sepolia receiver)
-- `CCIP_GAS_LIMIT` (optional)
-
-### Deploy Base Sepolia (TokenB + Receiver)
+If you are working on Solidity and deployments:
 
 ```bash
 cd contracts
-export PRIVATE_KEY=0x...
-forge script script/DeployBaseSepolia.s.sol:DeployBaseSepolia \
-  --rpc-url https://sepolia.base.org \
-  --broadcast -vvvv
+forge build
 ```
 
-### Deploy Sepolia (TokenA + Issuer + Sender)
+## CRE workflow (advanced)
+
+Workflow development and on-chain broadcast requires the `cre` CLI and testnet funding.
+
+For simulation and demo scripts, see the `scripts/` directory.
+
+## Contract deployment (Foundry) (advanced)
+
+Contract code and deployment scripts live in `contracts/`.
+
+Typical workflow:
 
 ```bash
 cd contracts
-export PRIVATE_KEY=0x...
-export BASE_RECEIVER=0x...
-export WORKFLOW_OPERATOR=0x... # optional, defaults to deployer
-forge script script/DeploySepolia.s.sol:DeploySepolia \
-  --rpc-url https://ethereum-sepolia-rpc.publicnode.com \
-  --broadcast -vvvv
+forge build
 ```
 
-### Deploy Sepolia CRE write receiver adapters (Issuer + Sender)
+To deploy to testnets, use the Foundry scripts under `contracts/script/` with `--broadcast`.
 
-The CRE EVM Write Forwarder expects the receiver contract to implement `onReport(...)`. This repo uses `CREReportReceiverAdapter` as a thin receiver that forwards the call into the real target contract (`GreenReserveIssuer` / `GreenReserveCCIPSender`).
-
-Deploy the adapters:
-
-```bash
-cd contracts
-export PRIVATE_KEY=0x...
-export CRE_FORWARDER=0x15fC6ae953E024d975e77382eEeC56A9101f9F88
-export ISSUER=0x...
-export SENDER=0x...
-forge script script/DeploySepoliaAdapters.s.sol:DeploySepoliaAdapters \
-  --rpc-url https://ethereum-sepolia-rpc.publicnode.com \
-  --broadcast -vvvv
-```
-
-Then update Issuer/Sender operators to the adapter addresses (required because the adapter becomes `msg.sender` when calling the target contracts):
-
-```bash
-cast send <SEPOLIA_ISSUER_ADDRESS> \
-  "setOperator(address)" <ISSUER_ADAPTER_ADDRESS> \
-  --private-key $PRIVATE_KEY \
-  --rpc-url https://ethereum-sepolia-rpc.publicnode.com
-
-cast send <SEPOLIA_SENDER_ADDRESS> \
-  "setOperator(address)" <SENDER_ADAPTER_ADDRESS> \
-  --private-key $PRIVATE_KEY \
-  --rpc-url https://ethereum-sepolia-rpc.publicnode.com
-```
-
-Finally, set these addresses in the workflow config:
-- `sepoliaIssuerWriteReceiverAddress` = issuer adapter address
-- `sepoliaSenderWriteReceiverAddress` = sender adapter address
-
-### Fund Sepolia sender with ETH (for CCIP fees)
-
-`GreenReserveCCIPSender.send(...)` pays CCIP fees from the contract balance (not `msg.value`). Send some Sepolia ETH to the deployed sender address:
-
-```bash
-cast send <SEPOLIA_SENDER_ADDRESS> \
-  --value 0.01ether \
-  --private-key $PRIVATE_KEY \
-  --rpc-url https://ethereum-sepolia-rpc.publicnode.com
-```
-
-### Allowlist Sepolia sender on Base Sepolia receiver
-
-```bash
-cd contracts
-export PRIVATE_KEY=0x...
-export BASE_RECEIVER=0x...
-export SEPOLIA_SENDER=0x...
-forge script script/ConfigureBaseSepoliaReceiver.s.sol:ConfigureBaseSepoliaReceiver \
-  --rpc-url https://sepolia.base.org \
-  --broadcast -vvvv
-```
-
+Environment variables are read from your local shell or `.env` files. Never commit private keys.
