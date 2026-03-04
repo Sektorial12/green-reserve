@@ -1,6 +1,10 @@
-const defaultUrl = "https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.xml"
+const ofacDefaultUrl = "https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.xml"
+const euDefaultUrl = "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"
+const ukDefaultUrl = "https://sanctionslist.fcdo.gov.uk/docs/UK-Sanctions-List.xml"
 
-type SanctionsCache = {
+type ListId = "ofac_sdn_advanced" | "eu_consolidated" | "uk_sanctions_list"
+
+type SanctionsListCache = {
   fetchedAtMs: number
   sourceUrl: string
   sha256: string
@@ -9,11 +13,52 @@ type SanctionsCache = {
   addresses: Set<string>
 }
 
-let cache: SanctionsCache | null = null
-let inFlight: Promise<void> | null = null
-let lastError: string | null = null
-let lastAttemptedAtMs: number | null = null
-let lastLoadedAtMs: number | null = null
+type SanctionsListState = {
+  cache: SanctionsListCache | null
+  inFlight: Promise<void> | null
+  lastError: string | null
+  lastAttemptedAtMs: number | null
+  lastLoadedAtMs: number | null
+  enableEnv?: string
+  urlEnv: string
+  pathEnv: string
+  defaultUrl?: string
+}
+
+const lists: Record<ListId, SanctionsListState> = {
+  ofac_sdn_advanced: {
+    cache: null,
+    inFlight: null,
+    lastError: null,
+    lastAttemptedAtMs: null,
+    lastLoadedAtMs: null,
+    urlEnv: "OFAC_SDN_ADVANCED_URL",
+    pathEnv: "OFAC_SDN_ADVANCED_PATH",
+    defaultUrl: ofacDefaultUrl,
+  },
+  eu_consolidated: {
+    cache: null,
+    inFlight: null,
+    lastError: null,
+    lastAttemptedAtMs: null,
+    lastLoadedAtMs: null,
+    enableEnv: "EU_SANCTIONS_ENABLE",
+    urlEnv: "EU_SANCTIONS_URL",
+    pathEnv: "EU_SANCTIONS_PATH",
+    defaultUrl: euDefaultUrl,
+  },
+  uk_sanctions_list: {
+    cache: null,
+    inFlight: null,
+    lastError: null,
+    lastAttemptedAtMs: null,
+    lastLoadedAtMs: null,
+    enableEnv: "UK_SANCTIONS_ENABLE",
+    urlEnv: "UK_SANCTIONS_URL",
+    pathEnv: "UK_SANCTIONS_PATH",
+    defaultUrl: ukDefaultUrl,
+  },
+}
 
 const sha256Hex = async (text: string): Promise<string> => {
   const bytes = new TextEncoder().encode(text)
@@ -33,29 +78,44 @@ const extractEvmAddresses = (xmlText: string): Set<string> => {
   return out
 }
 
-export const ensureSanctionsLoaded = async (): Promise<void> => {
+const isTruthy = (raw: string): boolean => {
+  const v = raw.trim().toLowerCase()
+  return v === "1" || v === "true" || v === "yes" || v === "y"
+}
+
+const isEnabled = (id: ListId): boolean => {
+  if (id === "ofac_sdn_advanced") return true
+  const st = lists[id]
+  const p = (Bun.env[st.pathEnv] ?? "").trim()
+  const u = (Bun.env[st.urlEnv] ?? "").trim()
+  const enabledByFlag = st.enableEnv ? isTruthy(String(Bun.env[st.enableEnv] ?? "")) : false
+  return Boolean(p || u || enabledByFlag)
+}
+
+const ensureListLoaded = async (id: ListId): Promise<void> => {
+  const st = lists[id]
   const ttlSec = Number.parseInt(Bun.env.SANCTIONS_CACHE_TTL_SEC ?? "3600", 10)
   const ttlMs = Number.isFinite(ttlSec) ? ttlSec * 1000 : 3600 * 1000
 
-  if (cache && Date.now() - cache.fetchedAtMs < ttlMs) return
+  if (st.cache && Date.now() - st.cache.fetchedAtMs < ttlMs) return
 
-  if (inFlight) {
-    await inFlight
+  if (st.inFlight) {
+    await st.inFlight
     return
   }
 
-  inFlight = (async () => {
-    lastAttemptedAtMs = Date.now()
-    const sourcePath = Bun.env.OFAC_SDN_ADVANCED_PATH
+  st.inFlight = (async () => {
+    st.lastAttemptedAtMs = Date.now()
+    const sourcePath = (Bun.env[st.pathEnv] ?? "").trim()
     if (sourcePath) {
       const file = Bun.file(sourcePath)
       if (!(await file.exists())) {
-        throw new Error(`sanctions_file_not_found path=${sourcePath}`)
+        throw new Error(`sanctions_file_not_found list=${id} path=${sourcePath}`)
       }
-      const xmlText = await file.text()
-      const sha256 = await sha256Hex(xmlText)
-      const addresses = extractEvmAddresses(xmlText)
-      cache = {
+      const text = await file.text()
+      const sha256 = await sha256Hex(text)
+      const addresses = extractEvmAddresses(text)
+      st.cache = {
         fetchedAtMs: Date.now(),
         sourceUrl: `file://${sourcePath}`,
         sha256,
@@ -63,21 +123,25 @@ export const ensureSanctionsLoaded = async (): Promise<void> => {
         lastModified: null,
         addresses,
       }
-      lastLoadedAtMs = cache.fetchedAtMs
-      lastError = null
+      st.lastLoadedAtMs = st.cache.fetchedAtMs
+      st.lastError = null
       return
     }
 
-    const sourceUrl = Bun.env.OFAC_SDN_ADVANCED_URL ?? defaultUrl
-    const timeoutMs = Number.parseInt(Bun.env.SANCTIONS_FETCH_TIMEOUT_MS ?? "20000", 10)
+    const sourceUrl = ((Bun.env[st.urlEnv] ?? "").trim() || st.defaultUrl || "").trim()
+    if (!sourceUrl) {
+      throw new Error(`sanctions_source_not_configured list=${id}`)
+    }
+
+    const timeoutMs = Number.parseInt(Bun.env.SANCTIONS_FETCH_TIMEOUT_MS ?? "60000", 10)
     const controller = new AbortController()
 
-    const timeoutMsSafe = Number.isFinite(timeoutMs) ? timeoutMs : 20000
+    const timeoutMsSafe = Number.isFinite(timeoutMs) ? timeoutMs : 60000
     const fetchPromise = fetch(sourceUrl, {
       headers: {
-        accept: "application/xml,text/xml,*/*",
-        ...(cache?.etag ? { "if-none-match": cache.etag } : {}),
-        ...(cache?.lastModified ? { "if-modified-since": cache.lastModified } : {}),
+        accept: "application/xml,text/xml,text/csv,application/json,text/plain,*/*",
+        ...(st.cache?.etag ? { "if-none-match": st.cache.etag } : {}),
+        ...(st.cache?.lastModified ? { "if-modified-since": st.cache.lastModified } : {}),
       },
       signal: controller.signal,
     })
@@ -91,28 +155,28 @@ export const ensureSanctionsLoaded = async (): Promise<void> => {
           } catch {
             // ignore
           }
-          reject(new Error(`sanctions_fetch_timeout url=${sourceUrl} timeoutMs=${timeoutMsSafe}`))
+          reject(new Error(`sanctions_fetch_timeout list=${id} url=${sourceUrl} timeoutMs=${timeoutMsSafe}`))
         }, timeoutMsSafe),
       ),
     ])) as Response
 
-    if (resp.status === 304 && cache) {
-      cache = { ...cache, fetchedAtMs: Date.now() }
+    if (resp.status === 304 && st.cache) {
+      st.cache = { ...st.cache, fetchedAtMs: Date.now() }
       return
     }
 
     if (!resp.ok) {
-      throw new Error(`sanctions_fetch_failed url=${sourceUrl} status=${resp.status}`)
+      throw new Error(`sanctions_fetch_failed list=${id} url=${sourceUrl} status=${resp.status}`)
     }
 
-    const xmlText = await resp.text()
-    const sha256 = await sha256Hex(xmlText)
-    const addresses = extractEvmAddresses(xmlText)
+    const text = await resp.text()
+    const sha256 = await sha256Hex(text)
+    const addresses = extractEvmAddresses(text)
 
     const etag = resp.headers.get("etag")
     const lastModified = resp.headers.get("last-modified")
 
-    cache = {
+    st.cache = {
       fetchedAtMs: Date.now(),
       sourceUrl,
       sha256,
@@ -120,73 +184,144 @@ export const ensureSanctionsLoaded = async (): Promise<void> => {
       lastModified,
       addresses,
     }
-    lastLoadedAtMs = cache.fetchedAtMs
-    lastError = null
+    st.lastLoadedAtMs = st.cache.fetchedAtMs
+    st.lastError = null
   })().finally(() => {
-    inFlight = null
+    st.inFlight = null
   })
 
   try {
-    await inFlight
+    await st.inFlight
   } catch (e) {
-    lastError = (e as Error).message
+    st.lastError = (e as Error).message
     throw e
   }
 }
 
+export const ensureSanctionsLoaded = async (): Promise<void> => {
+  const enabled: ListId[] = ["ofac_sdn_advanced"]
+  if (isEnabled("eu_consolidated")) enabled.push("eu_consolidated")
+  if (isEnabled("uk_sanctions_list")) enabled.push("uk_sanctions_list")
+
+  await Promise.all(enabled.map((id) => ensureListLoaded(id)))
+}
+
 export const getSanctionsLoadState = () => {
   return {
-    loaded: Boolean(cache),
-    inFlight: Boolean(inFlight),
-    lastError,
-    lastAttemptedAtMs,
-    lastLoadedAtMs,
+    lists: {
+      ofac_sdn_advanced: {
+        enabled: isEnabled("ofac_sdn_advanced"),
+        loaded: Boolean(lists.ofac_sdn_advanced.cache),
+        inFlight: Boolean(lists.ofac_sdn_advanced.inFlight),
+        lastError: lists.ofac_sdn_advanced.lastError,
+        lastAttemptedAtMs: lists.ofac_sdn_advanced.lastAttemptedAtMs,
+        lastLoadedAtMs: lists.ofac_sdn_advanced.lastLoadedAtMs,
+      },
+      eu_consolidated: {
+        enabled: isEnabled("eu_consolidated"),
+        loaded: Boolean(lists.eu_consolidated.cache),
+        inFlight: Boolean(lists.eu_consolidated.inFlight),
+        lastError: lists.eu_consolidated.lastError,
+        lastAttemptedAtMs: lists.eu_consolidated.lastAttemptedAtMs,
+        lastLoadedAtMs: lists.eu_consolidated.lastLoadedAtMs,
+      },
+      uk_sanctions_list: {
+        enabled: isEnabled("uk_sanctions_list"),
+        loaded: Boolean(lists.uk_sanctions_list.cache),
+        inFlight: Boolean(lists.uk_sanctions_list.inFlight),
+        lastError: lists.uk_sanctions_list.lastError,
+        lastAttemptedAtMs: lists.uk_sanctions_list.lastAttemptedAtMs,
+        lastLoadedAtMs: lists.uk_sanctions_list.lastLoadedAtMs,
+      },
+    },
   }
 }
 
 export const getSanctionsMeta = () => {
-  if (!cache) return null
+  const out: Record<string, any> = {}
+
+  const listIds: ListId[] = ["ofac_sdn_advanced", "eu_consolidated", "uk_sanctions_list"]
+
+  for (const id of listIds) {
+    if (!isEnabled(id)) continue
+    if (!lists[id].cache) return null
+  }
+
+  for (const id of listIds) {
+    const st = lists[id]
+    if (!st.cache) continue
+    out[id] = {
+      sourceUrl: st.cache.sourceUrl,
+      sha256: st.cache.sha256,
+      etag: st.cache.etag,
+      lastModified: st.cache.lastModified,
+      blockedAddressCount: st.cache.addresses.size,
+    }
+  }
+
+  if (Object.keys(out).length === 0) return null
+
   return {
-    sourceUrl: cache.sourceUrl,
-    sha256: cache.sha256,
-    etag: cache.etag,
-    lastModified: cache.lastModified,
-    blockedAddressCount: cache.addresses.size,
+    lists: out,
   }
 }
 
-export const screenAddressAgainstSanctions = (address: string): { isAllowed: boolean; reason: string; evidence?: any } => {
+export const screenAddressAgainstSanctions = (
+  address: string,
+): { isAllowed: boolean; reason: string; ruleId: string; evidence?: any } => {
   const normalized = address.toLowerCase()
 
-  if (!cache) {
+  const meta = getSanctionsMeta()
+  if (!meta) {
     return {
       isAllowed: false,
       reason: "sanctions_not_loaded",
+      ruleId: "SANCTIONS:NOT_LOADED",
     }
   }
 
-  const hit = cache.addresses.has(normalized)
-  if (hit) {
-    return {
-      isAllowed: false,
-      reason: "sanctions_ofac_sdn_match",
-      evidence: {
-        sourceUrl: cache.sourceUrl,
-        sha256: cache.sha256,
-        etag: cache.etag,
-        lastModified: cache.lastModified,
-      },
+  const listIds: ListId[] = ["ofac_sdn_advanced", "eu_consolidated", "uk_sanctions_list"]
+  for (const id of listIds) {
+    const st = lists[id]
+    if (!st.cache) continue
+    if (st.cache.addresses.has(normalized)) {
+      return {
+        isAllowed: false,
+        reason: `sanctions_${id}_match`,
+        ruleId: `SANCTIONS:${id}:ADDRESS_MATCH`,
+        evidence: {
+          sourceUrl: st.cache.sourceUrl,
+          sha256: st.cache.sha256,
+          etag: st.cache.etag,
+          lastModified: st.cache.lastModified,
+          lists: meta.lists,
+          matchedList: id,
+        },
+      }
     }
   }
+
+  const primaryList: ListId | null = ((): ListId | null => {
+    if (lists.ofac_sdn_advanced.cache) return "ofac_sdn_advanced"
+    for (const id of listIds) if (lists[id].cache) return id
+    return null
+  })()
 
   return {
     isAllowed: true,
     reason: "sanctions_clear",
+    ruleId: "SANCTIONS:CLEAR",
     evidence: {
-      sourceUrl: cache.sourceUrl,
-      sha256: cache.sha256,
-      etag: cache.etag,
-      lastModified: cache.lastModified,
+      ...(primaryList && lists[primaryList].cache
+        ? {
+            sourceUrl: lists[primaryList].cache!.sourceUrl,
+            sha256: lists[primaryList].cache!.sha256,
+            etag: lists[primaryList].cache!.etag,
+            lastModified: lists[primaryList].cache!.lastModified,
+            primaryList,
+          }
+        : {}),
+      lists: meta.lists,
     },
   }
 }

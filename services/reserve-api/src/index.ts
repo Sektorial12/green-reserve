@@ -140,8 +140,13 @@ Bun.serve({
       if (!meta) {
         ensureSanctionsLoaded().catch(() => {})
         const state = getSanctionsLoadState()
+        const msg =
+          state.lists.ofac_sdn_advanced.lastError ??
+          state.lists.eu_consolidated.lastError ??
+          state.lists.uk_sanctions_list.lastError ??
+          "sanctions_not_loaded"
         return json(
-          { error: "sanctions_unavailable", message: state.lastError ?? "sanctions_not_loaded" },
+          { error: "sanctions_unavailable", message: msg },
           { status: 503 },
           req,
         )
@@ -181,8 +186,13 @@ Bun.serve({
       if (!getSanctionsMeta()) {
         ensureSanctionsLoaded().catch(() => {})
         const state = getSanctionsLoadState()
+        const msg =
+          state.lists.ofac_sdn_advanced.lastError ??
+          state.lists.eu_consolidated.lastError ??
+          state.lists.uk_sanctions_list.lastError ??
+          "sanctions_not_loaded"
         return json(
-          { error: "sanctions_unavailable", message: state.lastError ?? "sanctions_not_loaded" },
+          { error: "sanctions_unavailable", message: msg },
           { status: 503 },
           req,
         )

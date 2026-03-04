@@ -38,8 +38,10 @@ const makeDepositNoticeMessage = (n: DepositNotice, custodianAddress: string): s
 }
 
 export const runDepositCreate = async (opts: {
+  json?: boolean
   configFile?: string
   reserveApiBaseUrl?: string
+  crePath?: string
   nonInteractive?: boolean
   to?: string
   amountEth?: string
@@ -133,6 +135,18 @@ export const runDepositCreate = async (opts: {
     signature,
   })
 
+  if (opts.json) {
+    process.stdout.write(
+      JSON.stringify({
+        depositId: resp.depositId,
+        custodianAddress: resp.custodianAddress,
+        messageHash: resp.messageHash,
+        clientMessageHash: messageHash,
+      }) + "\n",
+    )
+    return
+  }
+
   process.stdout.write(`depositId=${resp.depositId}\n`)
   process.stdout.write(`custodianAddress=${resp.custodianAddress}\n`)
   process.stdout.write(`messageHash=${resp.messageHash}\n`)
@@ -140,6 +154,7 @@ export const runDepositCreate = async (opts: {
 }
 
 export const runDepositSubmit = async (opts: {
+  json?: boolean
   depositId: string
   scenario?: string
   target?: string
@@ -190,16 +205,43 @@ export const runDepositSubmit = async (opts: {
   const proc = Bun.spawn([crePath, ...args], {
     cwd: repoRoot,
     stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
+    stdout: opts.json ? "pipe" : "inherit",
+    stderr: opts.json ? "pipe" : "inherit",
     env: process.env,
   })
 
+  if (opts.json) {
+    const drainToStderr = async (body: unknown) => {
+      const ab = await new Response(body as any).arrayBuffer()
+      process.stderr.write(new Uint8Array(ab))
+    }
+
+    const drains: Promise<void>[] = []
+    if (proc.stdout) drains.push(drainToStderr(proc.stdout))
+    if (proc.stderr) drains.push(drainToStderr(proc.stderr))
+    await Promise.all(drains)
+  }
+
   const code = await proc.exited
+  if (opts.json) {
+    process.stdout.write(
+      JSON.stringify({
+        ok: code === 0,
+        depositId,
+        scenario,
+        target,
+        triggerIndex,
+        payloadFile: tmp,
+        exitCode: code,
+      }) + "\n",
+    )
+  }
+
   if (code !== 0) process.exit(code)
 }
 
 export const runDepositStatus = async (opts: {
+  json?: boolean
   configFile?: string
   reserveApiBaseUrl?: string
   depositId: string
@@ -296,7 +338,9 @@ export const runDepositStatus = async (opts: {
     return { to, amountWei, used, processed, tokenBBalance, audit }
   }
 
-  process.stdout.write(`depositId=${depositId}\n`)
+  if (!opts.json) {
+    process.stdout.write(`depositId=${depositId}\n`)
+  }
 
   const intervalSec = Number.isFinite(opts.intervalSec) ? (opts.intervalSec as number) : 5
   const watch = Boolean(opts.watch)
@@ -304,19 +348,35 @@ export const runDepositStatus = async (opts: {
   while (true) {
     const { to, amountWei, used, processed, tokenBBalance, audit } = await pollOnce()
 
-    if (to) process.stdout.write(`to=${to}\n`)
-    if (amountWei) process.stdout.write(`amountWei=${amountWei}\n`)
-    process.stdout.write(`usedDepositId=${used ? "true" : "false"}\n`)
-    process.stdout.write(`processedDepositId=${processed ? "true" : "false"}\n`)
-    if (tokenBBalance !== null) process.stdout.write(`tokenBBalance=${tokenBBalance}\n`)
+    if (opts.json) {
+      process.stdout.write(
+        JSON.stringify({
+          depositId,
+          to: to || undefined,
+          amountWei: amountWei || undefined,
+          usedDepositId: used,
+          processedDepositId: processed,
+          tokenBBalance: tokenBBalance ?? undefined,
+          audit: audit ?? undefined,
+        }) + "\n",
+      )
+    } else {
+      if (to) process.stdout.write(`to=${to}\n`)
+      if (amountWei) process.stdout.write(`amountWei=${amountWei}\n`)
+      process.stdout.write(`usedDepositId=${used ? "true" : "false"}\n`)
+      process.stdout.write(`processedDepositId=${processed ? "true" : "false"}\n`)
+      if (tokenBBalance !== null) process.stdout.write(`tokenBBalance=${tokenBBalance}\n`)
 
-    if (audit) {
-      if (audit.depositNoticeHash) process.stdout.write(`auditDepositNoticeHash=${audit.depositNoticeHash}\n`)
-      if (audit.reserveAttestationHash) process.stdout.write(`auditReserveAttestationHash=${audit.reserveAttestationHash}\n`)
-      if (audit.complianceDecisionHash) process.stdout.write(`auditComplianceDecisionHash=${audit.complianceDecisionHash}\n`)
-      if (audit.aiOutputHash) process.stdout.write(`auditAiOutputHash=${audit.aiOutputHash}\n`)
-      if (audit.updatedAt) process.stdout.write(`auditUpdatedAt=${audit.updatedAt}\n`)
-      if (audit.updater) process.stdout.write(`auditUpdater=${audit.updater}\n`)
+      if (audit) {
+        if (audit.depositNoticeHash) process.stdout.write(`auditDepositNoticeHash=${audit.depositNoticeHash}\n`)
+        if (audit.reserveAttestationHash)
+          process.stdout.write(`auditReserveAttestationHash=${audit.reserveAttestationHash}\n`)
+        if (audit.complianceDecisionHash)
+          process.stdout.write(`auditComplianceDecisionHash=${audit.complianceDecisionHash}\n`)
+        if (audit.aiOutputHash) process.stdout.write(`auditAiOutputHash=${audit.aiOutputHash}\n`)
+        if (audit.updatedAt) process.stdout.write(`auditUpdatedAt=${audit.updatedAt}\n`)
+        if (audit.updater) process.stdout.write(`auditUpdater=${audit.updater}\n`)
+      }
     }
 
     if (!watch || processed) break

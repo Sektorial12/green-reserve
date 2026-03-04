@@ -7,6 +7,7 @@ const SENDER_ABI = parseAbi(["function operator() view returns (address)"])
 const AUDIT_REGISTRY_ABI = parseAbi(["function operator() view returns (address)"])
 
 export const runDoctor = async (opts: {
+  json?: boolean
   configFile?: string
   reserveApiBaseUrl?: string
   sepoliaRpc?: string
@@ -20,6 +21,7 @@ export const runDoctor = async (opts: {
   const sepoliaRpc = opts.sepoliaRpc ?? process.env.SEPOLIA_RPC ?? "https://ethereum-sepolia-rpc.publicnode.com"
 
   const failures: string[] = []
+  let sanctionsMeta: any = null
 
   const crePath = opts.crePath ?? process.env.CRE_CLI_PATH ?? Bun.which("cre") ?? ""
   if (!crePath) failures.push("missing_cre_cli")
@@ -32,7 +34,7 @@ export const runDoctor = async (opts: {
   }
 
   try {
-    const maxWaitMs = Number.parseInt(process.env.DOCTOR_SANCTIONS_WAIT_MS ?? "60000", 10)
+    const maxWaitMs = Number.parseInt(process.env.DOCTOR_SANCTIONS_WAIT_MS ?? "180000", 10)
     const start = Date.now()
     let lastErr: Error | null = null
     while (true) {
@@ -41,6 +43,7 @@ export const runDoctor = async (opts: {
         if (!meta?.ok) {
           lastErr = new Error("sanctions_meta_not_ok")
         } else {
+          sanctionsMeta = meta
           break
         }
       } catch (e) {
@@ -126,10 +129,42 @@ export const runDoctor = async (opts: {
     }
   }
 
+  const out = {
+    ok: failures.length === 0,
+    configPath,
+    reserveApiBaseUrl: baseUrl,
+    sepoliaRpc,
+    creCli: crePath,
+    sanctions: sanctionsMeta?.lists ?? undefined,
+    issuer: issuer || undefined,
+    issuerWriteReceiver: issuerWr || undefined,
+    sender: sender || undefined,
+    senderWriteReceiver: senderWr || undefined,
+    auditRegistry: auditRegistry || undefined,
+    auditRegistryWriteReceiver: auditRegistryWr || undefined,
+    failures,
+  }
+
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(out) + "\n")
+    if (failures.length) process.exit(1)
+    return
+  }
+
   process.stdout.write(`config=${configPath}\n`)
   process.stdout.write(`reserveApiBaseUrl=${baseUrl}\n`)
   process.stdout.write(`sepoliaRpc=${sepoliaRpc}\n`)
   process.stdout.write(`creCli=${crePath}\n`)
+
+  if (sanctionsMeta?.lists && typeof sanctionsMeta.lists === "object") {
+    const listOrder = ["ofac_sdn_advanced", "eu_consolidated", "uk_sanctions_list"]
+    const listIds = listOrder.filter((id) => sanctionsMeta.lists[id])
+    process.stdout.write(`sanctionsLists=${listIds.join(",")}\n`)
+    for (const id of listIds) {
+      const sha = String(sanctionsMeta?.lists?.[id]?.sha256 ?? "")
+      if (sha) process.stdout.write(`sanctions_${id}_sha256=${sha}\n`)
+    }
+  }
 
   if (issuer) process.stdout.write(`issuer=${issuer}\n`)
   if (issuerWr) process.stdout.write(`issuerWriteReceiver=${issuerWr}\n`)
