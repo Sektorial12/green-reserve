@@ -99,6 +99,8 @@ const main = async () => {
     .option("--reserve-api-base-url <url>")
     .option("--sepolia-rpc <url>")
     .option("--base-rpc <url>")
+    .option("--ccip-tx-hash <bytes32>")
+    .option("--message-id <bytes32>")
     .option("--watch")
     .option("--interval-sec <n>")
     .action(async (opts) => {
@@ -110,6 +112,8 @@ const main = async () => {
           depositId: opts.depositId,
           sepoliaRpc: opts.sepoliaRpc,
           baseRpc: opts.baseRpc,
+          ccipTxHash: opts.ccipTxHash,
+          messageId: opts.messageId,
           watch: Boolean(opts.watch),
           intervalSec: opts.intervalSec ? Number.parseInt(opts.intervalSec, 10) : undefined,
         })

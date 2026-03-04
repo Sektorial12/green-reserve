@@ -1,7 +1,7 @@
 import prompts from "prompts"
 import path from "node:path"
 import { tmpdir } from "node:os"
-import { createPublicClient, hashMessage, http, parseAbi, parseEther } from "viem"
+import { createPublicClient, decodeEventLog, hashMessage, http, parseAbi, parseEther } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
 import { asUrlBase, httpGetJson, httpPostJson, isHexAddress, isHexBytes32, lower, repoRoot } from "./util"
 import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config"
@@ -9,6 +9,9 @@ import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config"
 const ISSUER_ABI = parseAbi(["function usedDepositId(bytes32 depositId) view returns (bool)"])
 const RECEIVER_ABI = parseAbi(["function processedDepositId(bytes32 depositId) view returns (bool)"])
 const ERC20_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"])
+const SENDER_EVENT_ABI = parseAbi([
+  "event MessageSent(bytes32 indexed messageId, bytes32 indexed depositId, address indexed to, uint256 amount)",
+])
 const AUDIT_REGISTRY_ABI = parseAbi([
   "function auditByDepositId(bytes32 depositId) view returns (bytes32 depositNoticeHash, bytes32 reserveAttestationHash, bytes32 complianceDecisionHash, bytes32 aiOutputHash, uint64 updatedAt, address updater)",
 ])
@@ -247,6 +250,8 @@ export const runDepositStatus = async (opts: {
   depositId: string
   sepoliaRpc?: string
   baseRpc?: string
+  ccipTxHash?: string
+  messageId?: string
   watch?: boolean
   intervalSec?: number
 }) => {
@@ -260,6 +265,50 @@ export const runDepositStatus = async (opts: {
   const sepoliaRpc = opts.sepoliaRpc ?? process.env.SEPOLIA_RPC ?? "https://ethereum-sepolia-rpc.publicnode.com"
   const baseRpc = opts.baseRpc ?? process.env.BASE_RPC ?? "https://sepolia.base.org"
 
+  const sender = cfg.sepoliaSenderAddress ?? ""
+  if (!sender || !isHexAddress(sender)) throw new Error("missing_or_invalid_sepoliaSenderAddress")
+
+  const ccipTxHash = (opts.ccipTxHash ?? "").trim()
+  if (ccipTxHash && !isHexBytes32(ccipTxHash)) throw new Error("invalid_ccip_tx_hash")
+
+  const providedMessageId = (opts.messageId ?? "").trim()
+  if (providedMessageId && !isHexBytes32(providedMessageId)) throw new Error("invalid_message_id")
+
+  const sepoliaExplorerBase = "https://sepolia.etherscan.io"
+  const baseSepoliaExplorerBase = "https://sepolia.basescan.org"
+  const ccipExplorerBase = "https://ccip.chain.link/msg"
+
+  const sepoliaClient = createPublicClient({ transport: http(sepoliaRpc) })
+  const baseClient = createPublicClient({ transport: http(baseRpc) })
+
+  const decodeMessageIdFromTx = async (): Promise<string | null> => {
+    if (!ccipTxHash) return null
+    try {
+      const receipt = await sepoliaClient.getTransactionReceipt({ hash: ccipTxHash as any })
+      for (const log of receipt.logs) {
+        try {
+          const decoded = decodeEventLog({
+            abi: SENDER_EVENT_ABI,
+            data: log.data,
+            topics: log.topics,
+          }) as any
+
+          if (decoded?.eventName !== "MessageSent") continue
+          if (String(decoded?.args?.depositId ?? "").toLowerCase() !== depositId.toLowerCase()) continue
+          const addr = String((log as any).address ?? "")
+          if (addr && addr.toLowerCase() !== sender.toLowerCase()) continue
+          const mid = String(decoded?.args?.messageId ?? "")
+          return isHexBytes32(mid) ? mid : null
+        } catch {
+          // ignore non-matching logs
+        }
+      }
+    } catch {
+      return null
+    }
+    return null
+  }
+
   const pollOnce = async () => {
     const dep = await httpGetJson<any>(`${baseUrl}/deposits?depositId=${encodeURIComponent(depositId)}`)
 
@@ -272,9 +321,6 @@ export const runDepositStatus = async (opts: {
 
     if (!issuer || !isHexAddress(issuer)) throw new Error("missing_or_invalid_sepoliaIssuerAddress")
     if (!receiver || !isHexAddress(receiver)) throw new Error("missing_or_invalid_baseSepoliaReceiverAddress")
-
-    const sepoliaClient = createPublicClient({ transport: http(sepoliaRpc) })
-    const baseClient = createPublicClient({ transport: http(baseRpc) })
 
     let audit:
       | null
@@ -342,30 +388,85 @@ export const runDepositStatus = async (opts: {
     process.stdout.write(`depositId=${depositId}\n`)
   }
 
+  const ccipTxUrl = ccipTxHash ? `${sepoliaExplorerBase}/tx/${ccipTxHash}` : ""
+  let decodedMessageId = providedMessageId
+  let ccipMsgUrl = decodedMessageId ? `${ccipExplorerBase}/${decodedMessageId}` : ""
+
+  const normalizeAudit = (
+    audit:
+      | null
+      | {
+          depositNoticeHash: string
+          reserveAttestationHash: string
+          complianceDecisionHash: string
+          aiOutputHash: string
+          updatedAt: string
+          updater: string
+        },
+  ) => {
+    if (!audit) return null
+    return {
+      depositNoticeHash: audit.depositNoticeHash || null,
+      reserveAttestationHash: audit.reserveAttestationHash || null,
+      complianceDecisionHash: audit.complianceDecisionHash || null,
+      aiOutputHash: audit.aiOutputHash || null,
+      updatedAt: audit.updatedAt || null,
+      updater: audit.updater || null,
+    }
+  }
+
   const intervalSec = Number.isFinite(opts.intervalSec) ? (opts.intervalSec as number) : 5
   const watch = Boolean(opts.watch)
 
+  let printedCcip = false
+  let seq = 0
+
   while (true) {
+    if (!decodedMessageId && ccipTxHash) {
+      decodedMessageId = (await decodeMessageIdFromTx()) || ""
+      if (decodedMessageId) ccipMsgUrl = `${ccipExplorerBase}/${decodedMessageId}`
+    }
+
     const { to, amountWei, used, processed, tokenBBalance, audit } = await pollOnce()
 
     if (opts.json) {
+      seq += 1
       process.stdout.write(
         JSON.stringify({
           depositId,
-          to: to || undefined,
-          amountWei: amountWei || undefined,
+          sequence: seq,
+          observedAtMs: Date.now(),
+          ccipTxHash: ccipTxHash || null,
+          messageId: decodedMessageId || null,
+          ccipTxUrl: ccipTxUrl || null,
+          ccipMsgUrl: ccipMsgUrl || null,
+          to: to || null,
+          amountWei: amountWei || null,
           usedDepositId: used,
           processedDepositId: processed,
-          tokenBBalance: tokenBBalance ?? undefined,
-          audit: audit ?? undefined,
+          tokenBBalance,
+          baseSepoliaAddressUrl: processed && to && isHexAddress(to) ? `${baseSepoliaExplorerBase}/address/${to}` : null,
+          audit: normalizeAudit(audit),
         }) + "\n",
       )
     } else {
+      if (!printedCcip) {
+        if (ccipTxHash) process.stdout.write(`ccipTxHash=${ccipTxHash}\n`)
+        if (decodedMessageId) process.stdout.write(`ccipMessageId=${decodedMessageId}\n`)
+        if (ccipTxUrl) process.stdout.write(`ccipTxExplorer=${ccipTxUrl}\n`)
+        if (ccipMsgUrl) process.stdout.write(`ccipMsgExplorer=${ccipMsgUrl}\n`)
+        printedCcip = true
+      }
+
       if (to) process.stdout.write(`to=${to}\n`)
       if (amountWei) process.stdout.write(`amountWei=${amountWei}\n`)
       process.stdout.write(`usedDepositId=${used ? "true" : "false"}\n`)
       process.stdout.write(`processedDepositId=${processed ? "true" : "false"}\n`)
       if (tokenBBalance !== null) process.stdout.write(`tokenBBalance=${tokenBBalance}\n`)
+
+      if (processed && to && isHexAddress(to)) {
+        process.stdout.write(`baseSepoliaAddressExplorer=${baseSepoliaExplorerBase}/address/${to}\n`)
+      }
 
       if (audit) {
         if (audit.depositNoticeHash) process.stdout.write(`auditDepositNoticeHash=${audit.depositNoticeHash}\n`)
