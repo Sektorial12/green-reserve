@@ -691,6 +691,9 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
     memoSha256: string
     inputSha256: string
     model: string
+    promptVersion: string
+    externalRssSha256: string
+    externalRssUrl: string
   } = null
   try {
     const aiUrl = `${baseUrl}/ai/risk-memo?depositId=${encodeURIComponent(deposit.depositId)}&to=${encodeURIComponent(
@@ -704,11 +707,15 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
       .result()
     const parsed = JSON.parse(aiText) as any
     if (parsed && parsed.ok && parsed.memo && parsed.memoSha256) {
+      const external = parsed.external && typeof parsed.external === "object" ? parsed.external : null
       ai = {
         memo: parsed.memo,
         memoSha256: parsed.memoSha256,
         inputSha256: parsed.inputSha256 ?? "",
         model: parsed.model ?? "",
+        promptVersion: parsed.promptVersion ?? "",
+        externalRssSha256: external?.rssSha256 ?? "",
+        externalRssUrl: external?.rssUrl ?? "",
       }
     }
   } catch (e) {
@@ -736,6 +743,11 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
     runtime.log(
       `ai_risk decision=${ai.memo.decision} riskScore=${ai.memo.riskScore} confidence=${ai.memo.confidence} memoSha256=${ai.memoSha256} model=${ai.model}`
     )
+    if (ai.promptVersion || ai.externalRssSha256 || ai.externalRssUrl) {
+      runtime.log(
+        `ai_evidence promptVersion=${ai.promptVersion} externalRssSha256=${ai.externalRssSha256} externalRssUrl=${ai.externalRssUrl}`
+      )
+    }
     if (ai.memo.decision === "reject") {
       runtime.log("blocked: reason=ai_reject")
       return "blocked"
