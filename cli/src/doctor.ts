@@ -3,8 +3,19 @@ import { asUrlBase, fmtBool, httpGetJson, isHexAddress, lower } from "./util"
 import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config"
 
 const ISSUER_ABI = parseAbi(["function operator() view returns (address)"])
-const SENDER_ABI = parseAbi(["function operator() view returns (address)"])
+const SENDER_ABI = parseAbi([
+  "function operator() view returns (address)",
+  "function estimateFee(address to, uint256 amount, bytes32 depositId) view returns (uint256)",
+])
 const AUDIT_REGISTRY_ABI = parseAbi(["function operator() view returns (address)"])
+
+const RECEIVER_ABI = parseAbi([
+  "function allowlistedSourceChains(uint64 chainSelector) view returns (bool)",
+  "function allowlistedSenders(address sender) view returns (bool)",
+])
+
+const SEPOLIA_CHAIN_SELECTOR_ON_BASE = 16015286601757825753n
+const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 export const runDoctor = async (opts: {
   json?: boolean
@@ -19,6 +30,7 @@ export const runDoctor = async (opts: {
 
   const baseUrl = asUrlBase(opts.reserveApiBaseUrl ?? process.env.RESERVE_API_BASE_URL ?? cfg.reserveApiBaseUrl)
   const sepoliaRpc = opts.sepoliaRpc ?? process.env.SEPOLIA_RPC ?? "https://ethereum-sepolia-rpc.publicnode.com"
+  const baseRpc = opts.baseRpc ?? process.env.BASE_RPC ?? "https://sepolia.base.org"
 
   const failures: string[] = []
   let sanctionsMeta: any = null
@@ -71,6 +83,7 @@ export const runDoctor = async (opts: {
   const issuerWr = cfg.sepoliaIssuerWriteReceiverAddress ?? ""
   const sender = cfg.sepoliaSenderAddress ?? ""
   const senderWr = cfg.sepoliaSenderWriteReceiverAddress ?? ""
+  const receiver = cfg.baseSepoliaReceiverAddress ?? ""
   const auditRegistry = cfg.sepoliaAuditRegistryAddress ?? ""
   const auditRegistryWr = cfg.sepoliaAuditRegistryWriteReceiverAddress ?? ""
 
@@ -78,6 +91,7 @@ export const runDoctor = async (opts: {
   if (issuerWr && !isHexAddress(issuerWr)) failures.push("invalid_sepoliaIssuerWriteReceiverAddress")
   if (sender && !isHexAddress(sender)) failures.push("invalid_sepoliaSenderAddress")
   if (senderWr && !isHexAddress(senderWr)) failures.push("invalid_sepoliaSenderWriteReceiverAddress")
+  if (receiver && !isHexAddress(receiver)) failures.push("invalid_baseSepoliaReceiverAddress")
   if (auditRegistry && !isHexAddress(auditRegistry)) failures.push("invalid_sepoliaAuditRegistryAddress")
   if (auditRegistryWr && !isHexAddress(auditRegistryWr)) failures.push("invalid_sepoliaAuditRegistryWriteReceiverAddress")
 
@@ -109,6 +123,68 @@ export const runDoctor = async (opts: {
     }
   }
 
+  let senderBalanceWei: string | null = null
+  let senderEstimatedFeeWei: string | null = null
+  let senderIsFunded: boolean | null = null
+
+  if (sender && isHexAddress(sender)) {
+    try {
+      const client = createPublicClient({ transport: http(sepoliaRpc) })
+      const bal = await client.getBalance({ address: sender as any })
+      senderBalanceWei = bal.toString()
+
+      let fee: bigint | null = null
+      try {
+        fee = (await client.readContract({
+          address: sender as any,
+          abi: SENDER_ABI,
+          functionName: "estimateFee",
+          args: ["0x0000000000000000000000000000000000000000", 0n, ZERO_BYTES32 as any],
+        })) as bigint
+      } catch {
+        fee = null
+      }
+
+      if (fee !== null) senderEstimatedFeeWei = fee.toString()
+      if (fee !== null) {
+        senderIsFunded = bal >= fee
+        if (!senderIsFunded) failures.push("ccip_sender_insufficient_balance")
+      } else {
+        senderIsFunded = bal > 0n
+        if (!senderIsFunded) failures.push("ccip_sender_unfunded")
+      }
+    } catch (e) {
+      failures.push(`ccip_sender_funding_check_failed ${(e as Error).message}`)
+    }
+  }
+
+  let receiverAllowlistedSourceChain: boolean | null = null
+  let receiverAllowlistedSender: boolean | null = null
+
+  if (receiver && isHexAddress(receiver) && sender && isHexAddress(sender)) {
+    try {
+      const client = createPublicClient({ transport: http(baseRpc) })
+      receiverAllowlistedSourceChain = (await client.readContract({
+        address: receiver as any,
+        abi: RECEIVER_ABI,
+        functionName: "allowlistedSourceChains",
+        args: [SEPOLIA_CHAIN_SELECTOR_ON_BASE],
+      })) as boolean
+
+      receiverAllowlistedSender = (await client.readContract({
+        address: receiver as any,
+        abi: RECEIVER_ABI,
+        functionName: "allowlistedSenders",
+        args: [sender as any],
+      })) as boolean
+
+      if (!receiverAllowlistedSourceChain) failures.push("base_receiver_source_chain_not_allowlisted")
+      if (!receiverAllowlistedSender) failures.push("base_receiver_sender_not_allowlisted")
+    } catch (e) {
+      failures.push(`base_receiver_allowlist_check_failed ${(e as Error).message}`)
+    }
+  }
+
   if (auditRegistry && auditRegistryWr) {
     try {
       const client = createPublicClient({ transport: http(sepoliaRpc) })
@@ -134,12 +210,19 @@ export const runDoctor = async (opts: {
     configPath,
     reserveApiBaseUrl: baseUrl,
     sepoliaRpc,
+    baseRpc,
     creCli: crePath,
     sanctions: sanctionsMeta?.lists ?? undefined,
     issuer: issuer || undefined,
     issuerWriteReceiver: issuerWr || undefined,
     sender: sender || undefined,
     senderWriteReceiver: senderWr || undefined,
+    receiver: receiver || undefined,
+    ccipSenderBalanceWei: senderBalanceWei,
+    ccipEstimatedFeeWei: senderEstimatedFeeWei,
+    ccipSenderIsFunded: senderIsFunded,
+    baseReceiverAllowlistedSourceChain: receiverAllowlistedSourceChain,
+    baseReceiverAllowlistedSender: receiverAllowlistedSender,
     auditRegistry: auditRegistry || undefined,
     auditRegistryWriteReceiver: auditRegistryWr || undefined,
     failures,
@@ -154,6 +237,7 @@ export const runDoctor = async (opts: {
   process.stdout.write(`config=${configPath}\n`)
   process.stdout.write(`reserveApiBaseUrl=${baseUrl}\n`)
   process.stdout.write(`sepoliaRpc=${sepoliaRpc}\n`)
+  process.stdout.write(`baseRpc=${baseRpc}\n`)
   process.stdout.write(`creCli=${crePath}\n`)
 
   if (sanctionsMeta?.lists && typeof sanctionsMeta.lists === "object") {
@@ -170,6 +254,15 @@ export const runDoctor = async (opts: {
   if (issuerWr) process.stdout.write(`issuerWriteReceiver=${issuerWr}\n`)
   if (sender) process.stdout.write(`sender=${sender}\n`)
   if (senderWr) process.stdout.write(`senderWriteReceiver=${senderWr}\n`)
+  if (receiver) process.stdout.write(`baseReceiver=${receiver}\n`)
+
+  if (senderBalanceWei) process.stdout.write(`ccipSenderBalanceWei=${senderBalanceWei}\n`)
+  if (senderEstimatedFeeWei) process.stdout.write(`ccipEstimatedFeeWei=${senderEstimatedFeeWei}\n`)
+  if (senderIsFunded !== null) process.stdout.write(`ccipSenderFunded=${senderIsFunded ? "true" : "false"}\n`)
+  if (receiverAllowlistedSourceChain !== null)
+    process.stdout.write(`baseReceiverAllowlistedSourceChain=${receiverAllowlistedSourceChain ? "true" : "false"}\n`)
+  if (receiverAllowlistedSender !== null)
+    process.stdout.write(`baseReceiverAllowlistedSender=${receiverAllowlistedSender ? "true" : "false"}\n`)
   if (auditRegistry) process.stdout.write(`auditRegistry=${auditRegistry}\n`)
   if (auditRegistryWr) process.stdout.write(`auditRegistryWriteReceiver=${auditRegistryWr}\n`)
 
