@@ -27,6 +27,8 @@ const main = async () => {
     .command("create")
     .option("--config-file <path>")
     .option("--reserve-api-base-url <url>")
+    .option("--cre-path <path>")
+    .option("--non-interactive")
     .option("--to <address>")
     .option("--amount-eth <eth>")
     .option("--chain <name>")
@@ -36,6 +38,7 @@ const main = async () => {
       await runDepositCreate({
         configFile: opts.configFile,
         reserveApiBaseUrl: opts.reserveApiBaseUrl,
+        nonInteractive: Boolean(opts.nonInteractive),
         to: opts.to,
         amountEth: opts.amountEth,
         chain: opts.chain,
@@ -70,6 +73,8 @@ const main = async () => {
     .option("--reserve-api-base-url <url>")
     .option("--sepolia-rpc <url>")
     .option("--base-rpc <url>")
+    .option("--watch")
+    .option("--interval-sec <n>")
     .action(async (opts) => {
       await runDepositStatus({
         configFile: opts.configFile,
@@ -77,6 +82,8 @@ const main = async () => {
         depositId: opts.depositId,
         sepoliaRpc: opts.sepoliaRpc,
         baseRpc: opts.baseRpc,
+        watch: Boolean(opts.watch),
+        intervalSec: opts.intervalSec ? Number.parseInt(opts.intervalSec, 10) : undefined,
       })
     })
 

@@ -1,5 +1,6 @@
 import prompts from "prompts"
 import path from "node:path"
+import { tmpdir } from "node:os"
 import { createPublicClient, hashMessage, http, parseAbi, parseEther } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
 import { asUrlBase, httpGetJson, httpPostJson, isHexAddress, isHexBytes32, lower, repoRoot } from "./util"
@@ -8,6 +9,9 @@ import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config"
 const ISSUER_ABI = parseAbi(["function usedDepositId(bytes32 depositId) view returns (bool)"])
 const RECEIVER_ABI = parseAbi(["function processedDepositId(bytes32 depositId) view returns (bool)"])
 const ERC20_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"])
+const AUDIT_REGISTRY_ABI = parseAbi([
+  "function auditByDepositId(bytes32 depositId) view returns (bytes32 depositNoticeHash, bytes32 reserveAttestationHash, bytes32 complianceDecisionHash, bytes32 aiOutputHash, uint64 updatedAt, address updater)",
+])
 
 type DepositNotice = {
   version: string
@@ -36,6 +40,7 @@ const makeDepositNoticeMessage = (n: DepositNotice, custodianAddress: string): s
 export const runDepositCreate = async (opts: {
   configFile?: string
   reserveApiBaseUrl?: string
+  nonInteractive?: boolean
   to?: string
   amountEth?: string
   chain?: string
@@ -52,13 +57,17 @@ export const runDepositCreate = async (opts: {
   const account = privateKeyToAccount(pk as `0x${string}`)
 
   const initialTo = opts.to ?? account.address
-  const initialAmountEth = opts.amountEth ?? ""
+  const initialAmountEth = opts.amountEth ?? "1"
   const initialChain = opts.chain ?? "base-sepolia"
   const initialCustodian = opts.custodian ?? "cli"
 
-  const isInteractive = process.stdin.isTTY
-  const answers = isInteractive
-    ? await prompts(
+  const allowPrompt = Boolean(process.stdin.isTTY && process.stdout.isTTY && !opts.nonInteractive)
+  const answers = await (async () => {
+    if (!allowPrompt) {
+      return { to: initialTo, amountEth: initialAmountEth, chain: initialChain, custodian: initialCustodian }
+    }
+    try {
+      return await prompts(
         [
           {
             type: opts.to ? null : "text",
@@ -71,7 +80,7 @@ export const runDepositCreate = async (opts: {
             type: opts.amountEth ? null : "text",
             name: "amountEth",
             message: "amount in ETH",
-            initial: "1",
+            initial: initialAmountEth,
             validate: (v: string) => (Number.isFinite(Number(v)) && Number(v) > 0 ? true : "invalid amount"),
           },
           {
@@ -89,12 +98,15 @@ export const runDepositCreate = async (opts: {
         ],
         { onCancel: () => process.exit(1) }
       )
-    : { to: initialTo, amountEth: initialAmountEth, chain: initialChain, custodian: initialCustodian }
+    } catch {
+      return { to: initialTo, amountEth: initialAmountEth, chain: initialChain, custodian: initialCustodian }
+    }
+  })()
 
   const to = lower(String(opts.to ?? answers.to ?? initialTo).trim())
   if (!isHexAddress(to)) throw new Error("invalid_to")
 
-  const amountEthStr = String(opts.amountEth ?? answers.amountEth ?? initialAmountEth ?? "1").trim()
+  const amountEthStr = String(opts.amountEth ?? answers.amountEth ?? initialAmountEth ?? "1").trim() || "1"
   const amountWei = parseEther(amountEthStr).toString()
 
   const chain = String(answers.chain ?? initialChain).trim()
@@ -154,7 +166,7 @@ export const runDepositSubmit = async (opts: {
 
   let tmp = opts.payloadFile
   if (!tmp) {
-    const tmpPath = path.join(Bun.tmpdir(), `greenreserve-${depositId}-${Date.now()}.json`)
+    const tmpPath = path.join(tmpdir(), `greenreserve-${depositId}-${Date.now()}.json`)
     await Bun.write(tmpPath, JSON.stringify(payload, null, 2) + "\n")
     tmp = tmpPath
   }
@@ -193,6 +205,8 @@ export const runDepositStatus = async (opts: {
   depositId: string
   sepoliaRpc?: string
   baseRpc?: string
+  watch?: boolean
+  intervalSec?: number
 }) => {
   const configPath = opts.configFile ?? defaultWorkflowConfigPath()
   const cfg = await readWorkflowConfig(configPath)
@@ -204,49 +218,108 @@ export const runDepositStatus = async (opts: {
   const sepoliaRpc = opts.sepoliaRpc ?? process.env.SEPOLIA_RPC ?? "https://ethereum-sepolia-rpc.publicnode.com"
   const baseRpc = opts.baseRpc ?? process.env.BASE_RPC ?? "https://sepolia.base.org"
 
-  const dep = await httpGetJson<any>(`${baseUrl}/deposits?depositId=${encodeURIComponent(depositId)}`)
+  const pollOnce = async () => {
+    const dep = await httpGetJson<any>(`${baseUrl}/deposits?depositId=${encodeURIComponent(depositId)}`)
 
-  const to = String(dep?.notice?.onchain?.to ?? "")
-  const amountWei = String(dep?.notice?.amountWei ?? "")
+    const to = String(dep?.notice?.onchain?.to ?? "")
+    const amountWei = String(dep?.notice?.amountWei ?? "")
+
+    const issuer = cfg.sepoliaIssuerAddress ?? ""
+    const receiver = cfg.baseSepoliaReceiverAddress ?? ""
+    const tokenB = cfg.baseSepoliaTokenBAddress ?? ""
+
+    if (!issuer || !isHexAddress(issuer)) throw new Error("missing_or_invalid_sepoliaIssuerAddress")
+    if (!receiver || !isHexAddress(receiver)) throw new Error("missing_or_invalid_baseSepoliaReceiverAddress")
+
+    const sepoliaClient = createPublicClient({ transport: http(sepoliaRpc) })
+    const baseClient = createPublicClient({ transport: http(baseRpc) })
+
+    let audit:
+      | null
+      | {
+          depositNoticeHash: string
+          reserveAttestationHash: string
+          complianceDecisionHash: string
+          aiOutputHash: string
+          updatedAt: string
+          updater: string
+        } = null
+
+    const auditRegistry = cfg.sepoliaAuditRegistryAddress ?? ""
+    if (auditRegistry && isHexAddress(auditRegistry)) {
+      try {
+        const result = (await sepoliaClient.readContract({
+          address: auditRegistry as any,
+          abi: AUDIT_REGISTRY_ABI,
+          functionName: "auditByDepositId",
+          args: [depositId as any],
+        })) as any
+
+        audit = {
+          depositNoticeHash: String(result?.[0] ?? ""),
+          reserveAttestationHash: String(result?.[1] ?? ""),
+          complianceDecisionHash: String(result?.[2] ?? ""),
+          aiOutputHash: String(result?.[3] ?? ""),
+          updatedAt: String(result?.[4] ?? ""),
+          updater: String(result?.[5] ?? ""),
+        }
+      } catch {
+        audit = null
+      }
+    }
+
+    const used = (await sepoliaClient.readContract({
+      address: issuer as any,
+      abi: ISSUER_ABI,
+      functionName: "usedDepositId",
+      args: [depositId as any],
+    })) as boolean
+
+    const processed = (await baseClient.readContract({
+      address: receiver as any,
+      abi: RECEIVER_ABI,
+      functionName: "processedDepositId",
+      args: [depositId as any],
+    })) as boolean
+
+    let tokenBBalance: string | null = null
+    if (processed && tokenB && isHexAddress(tokenB) && to && isHexAddress(to)) {
+      const bal = (await baseClient.readContract({
+        address: tokenB as any,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [to as any],
+      })) as bigint
+      tokenBBalance = bal.toString()
+    }
+
+    return { to, amountWei, used, processed, tokenBBalance, audit }
+  }
 
   process.stdout.write(`depositId=${depositId}\n`)
-  if (to) process.stdout.write(`to=${to}\n`)
-  if (amountWei) process.stdout.write(`amountWei=${amountWei}\n`)
 
-  const issuer = cfg.sepoliaIssuerAddress ?? ""
-  const receiver = cfg.baseSepoliaReceiverAddress ?? ""
-  const tokenB = cfg.baseSepoliaTokenBAddress ?? ""
+  const intervalSec = Number.isFinite(opts.intervalSec) ? (opts.intervalSec as number) : 5
+  const watch = Boolean(opts.watch)
 
-  if (!issuer || !isHexAddress(issuer)) throw new Error("missing_or_invalid_sepoliaIssuerAddress")
-  if (!receiver || !isHexAddress(receiver)) throw new Error("missing_or_invalid_baseSepoliaReceiverAddress")
+  while (true) {
+    const { to, amountWei, used, processed, tokenBBalance, audit } = await pollOnce()
 
-  const sepoliaClient = createPublicClient({ transport: http(sepoliaRpc) })
-  const baseClient = createPublicClient({ transport: http(baseRpc) })
+    if (to) process.stdout.write(`to=${to}\n`)
+    if (amountWei) process.stdout.write(`amountWei=${amountWei}\n`)
+    process.stdout.write(`usedDepositId=${used ? "true" : "false"}\n`)
+    process.stdout.write(`processedDepositId=${processed ? "true" : "false"}\n`)
+    if (tokenBBalance !== null) process.stdout.write(`tokenBBalance=${tokenBBalance}\n`)
 
-  const used = (await sepoliaClient.readContract({
-    address: issuer as any,
-    abi: ISSUER_ABI,
-    functionName: "usedDepositId",
-    args: [depositId as any],
-  })) as boolean
+    if (audit) {
+      if (audit.depositNoticeHash) process.stdout.write(`auditDepositNoticeHash=${audit.depositNoticeHash}\n`)
+      if (audit.reserveAttestationHash) process.stdout.write(`auditReserveAttestationHash=${audit.reserveAttestationHash}\n`)
+      if (audit.complianceDecisionHash) process.stdout.write(`auditComplianceDecisionHash=${audit.complianceDecisionHash}\n`)
+      if (audit.aiOutputHash) process.stdout.write(`auditAiOutputHash=${audit.aiOutputHash}\n`)
+      if (audit.updatedAt) process.stdout.write(`auditUpdatedAt=${audit.updatedAt}\n`)
+      if (audit.updater) process.stdout.write(`auditUpdater=${audit.updater}\n`)
+    }
 
-  const processed = (await baseClient.readContract({
-    address: receiver as any,
-    abi: RECEIVER_ABI,
-    functionName: "processedDepositId",
-    args: [depositId as any],
-  })) as boolean
-
-  process.stdout.write(`usedDepositId=${used ? "true" : "false"}\n`)
-  process.stdout.write(`processedDepositId=${processed ? "true" : "false"}\n`)
-
-  if (processed && tokenB && isHexAddress(tokenB) && to && isHexAddress(to)) {
-    const bal = (await baseClient.readContract({
-      address: tokenB as any,
-      abi: ERC20_ABI,
-      functionName: "balanceOf",
-      args: [to as any],
-    })) as bigint
-    process.stdout.write(`tokenBBalance=${bal.toString()}\n`)
+    if (!watch || processed) break
+    await new Promise((r) => setTimeout(r, Math.max(1, intervalSec) * 1000))
   }
 }

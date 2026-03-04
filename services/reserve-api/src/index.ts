@@ -1,4 +1,4 @@
-import { ensureSanctionsLoaded, getSanctionsMeta, screenAddressAgainstSanctions } from "./sanctions"
+import { ensureSanctionsLoaded, getSanctionsLoadState, getSanctionsMeta, screenAddressAgainstSanctions } from "./sanctions"
 import { generateRiskMemo } from "./ai"
 import { loadReservesState } from "./reserves"
 import { hashMessage, recoverAddress } from "viem"
@@ -123,6 +123,7 @@ const persistDeposits = async () => {
 
 Bun.serve({
   port: Number(Bun.env.PORT ?? 8788),
+  idleTimeout: 120,
   fetch: async (req) => {
     const url = new URL(req.url)
 
@@ -135,16 +136,17 @@ Bun.serve({
     }
 
     if (req.method === "GET" && url.pathname === "/sanctions/meta") {
-      try {
-        await ensureSanctionsLoaded()
-      } catch (e) {
+      const meta = getSanctionsMeta()
+      if (!meta) {
+        ensureSanctionsLoaded().catch(() => {})
+        const state = getSanctionsLoadState()
         return json(
-          { error: "sanctions_unavailable", message: (e as Error).message },
+          { error: "sanctions_unavailable", message: state.lastError ?? "sanctions_not_loaded" },
           { status: 503 },
           req,
         )
       }
-      return json({ ok: true, ...getSanctionsMeta() }, undefined, req)
+      return json({ ok: true, ...meta }, undefined, req)
     }
 
     if (req.method === "GET" && url.pathname === "/reserves") {
@@ -176,11 +178,11 @@ Bun.serve({
         return json({ address: normalized, isAllowed: false, reason: "invalid_address" }, undefined, req)
       }
 
-      try {
-        await ensureSanctionsLoaded()
-      } catch (e) {
+      if (!getSanctionsMeta()) {
+        ensureSanctionsLoaded().catch(() => {})
+        const state = getSanctionsLoadState()
         return json(
-          { error: "sanctions_unavailable", message: (e as Error).message },
+          { error: "sanctions_unavailable", message: state.lastError ?? "sanctions_not_loaded" },
           { status: 503 },
           req,
         )

@@ -40,7 +40,10 @@ export const fmtBool = (v: unknown) => (v === true ? "true" : v === false ? "fal
 
 export const httpGetJson = async <T>(url: string): Promise<T> => {
   const resp = await fetch(url, { headers: { accept: "application/json" } })
-  if (!resp.ok) throw new Error(`http_error status=${resp.status} url=${url}`)
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "")
+    throw new Error(`http_error status=${resp.status} url=${url} body=${text.slice(0, 300)}`)
+  }
   return (await resp.json()) as T
 }
 

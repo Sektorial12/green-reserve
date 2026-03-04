@@ -21,7 +21,9 @@ import {
   type Address,
   decodeFunctionResult,
   encodeFunctionData,
+  keccak256,
   parseAbi,
+  toBytes,
   zeroAddress,
 } from "viem"
 
@@ -36,6 +38,8 @@ const configSchema = z.object({
   sepoliaIssuerWriteReceiverAddress: z.string().optional(),
   sepoliaSenderAddress: z.string().optional(),
   sepoliaSenderWriteReceiverAddress: z.string().optional(),
+  sepoliaAuditRegistryAddress: z.string().optional(),
+  sepoliaAuditRegistryWriteReceiverAddress: z.string().optional(),
   baseSepoliaTokenBAddress: z.string().optional(),
   baseSepoliaReceiverAddress: z.string().optional(),
 })
@@ -73,6 +77,12 @@ const RECEIVER_ABI = parseAbi([
   "function getRouter() view returns (address)",
 ])
 
+const AUDIT_REGISTRY_ABI = parseAbi([
+  "function record(bytes32 depositId, bytes32 depositNoticeHash, bytes32 reserveAttestationHash, bytes32 complianceDecisionHash, bytes32 aiOutputHash)",
+])
+
+const ZERO_BYTES32 = ("0x" + "0".repeat(64)) as `0x${string}`
+
 const MESSAGE_SENT_TOPIC0 = "0xaf252146b623abbfc7d709584e656c80ec1b71e27d4a23ee2f8d1391caaddea6"
 const MESSAGE_RECEIVED_TOPIC0 = "0x74067246a35113666e7ea609db47ec0bceb8b77773497b430ca621d33584774f"
 const ROUTER_MESSAGE_EXECUTED_TOPIC0 = "0x9b877de93ea9895756e337442c657f95a34fc68e7eb988bdfa693d5be83016b6"
@@ -81,6 +91,43 @@ const bytesToAscii = (bytes: Uint8Array): string => {
   let result = ""
   for (let i = 0; i < bytes.length; i++) result += String.fromCharCode(bytes[i])
   return result
+}
+
+const writeAuditRecord = (
+  runtime: Runtime<Config>,
+  auditRegistryWriteReceiverAddress: Address,
+  depositId: `0x${string}`,
+  depositNoticeHash: `0x${string}`,
+  reserveAttestationHash: `0x${string}`,
+  complianceDecisionHash: `0x${string}`,
+  aiOutputHash: `0x${string}`
+) => {
+  const network = getNetwork({
+    chainFamily: "evm",
+    chainSelectorName: runtime.config.sepoliaChainSelectorName,
+    isTestnet: true,
+  })
+  if (!network) throw new Error(`Network not found: ${runtime.config.sepoliaChainSelectorName}`)
+
+  const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector)
+  const gasLimit = runtime.config.sepoliaWriteGasLimit ?? "800000"
+
+  const writeData = encodeFunctionData({
+    abi: AUDIT_REGISTRY_ABI,
+    functionName: "record",
+    args: [depositId, depositNoticeHash, reserveAttestationHash, complianceDecisionHash, aiOutputHash],
+  })
+
+  const report = runtime.report(prepareReportRequest(writeData)).result()
+  return evmClient
+    .writeReport(runtime, {
+      receiver: auditRegistryWriteReceiverAddress,
+      report,
+      gasConfig: {
+        gasLimit,
+      },
+    })
+    .result()
 }
 
 const parseConfig = (configBytes: Uint8Array): Config => {
@@ -571,27 +618,28 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
   const http = new cre.capabilities.HTTPClient()
   const baseUrl = runtime.config.reserveApiBaseUrl.replace(/\/$/, "")
 
-  let to = deposit.to
-  let amountWei = deposit.amount
+  const depText = http
+    .sendRequest(
+      runtime,
+      fetchJsonText(`${baseUrl}/deposits?depositId=${encodeURIComponent(deposit.depositId)}`),
+      consensusIdenticalAggregation()
+    )()
+    .result()
 
-  if (!to || !amountWei) {
-    const depText = http
-      .sendRequest(
-        runtime,
-        fetchJsonText(`${baseUrl}/deposits?depositId=${encodeURIComponent(deposit.depositId)}`),
-        consensusIdenticalAggregation()
-      )()
-      .result()
+  const dep = JSON.parse(depText) as any
+  const to = dep?.notice?.onchain?.to
+  const amountWei = dep?.notice?.amountWei
+  const depositNoticeHash = dep?.messageHash
 
-    const dep = JSON.parse(depText) as any
-    to = dep?.notice?.onchain?.to
-    amountWei = dep?.notice?.amountWei
-
-    if (typeof to !== "string" || typeof amountWei !== "string") {
-      runtime.log("blocked: reason=deposit_notice_missing")
-      return "blocked"
-    }
+  if (typeof to !== "string" || typeof amountWei !== "string") {
+    runtime.log("blocked: reason=deposit_notice_missing")
+    return "blocked"
   }
+
+  const depositNoticeHashBytes32 =
+    typeof depositNoticeHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(depositNoticeHash)
+      ? (depositNoticeHash as `0x${string}`)
+      : ZERO_BYTES32
 
   runtime.log(`depositId=${deposit.depositId} to=${to} amount=${amountWei}`)
 
@@ -605,6 +653,11 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
     messageHash?: string
   }
 
+  const reserveAttestationHashBytes32 =
+    typeof reserves.messageHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(reserves.messageHash)
+      ? (reserves.messageHash as `0x${string}`)
+      : ZERO_BYTES32
+
   if (reserves.auditor || reserves.proofRef || reserves.messageHash) {
     runtime.log(
       `reserves_evidence auditor=${reserves.auditor ?? ""} proofRef=${reserves.proofRef ?? ""} messageHash=${reserves.messageHash ?? ""}`
@@ -614,7 +667,19 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
   const kycText = http
     .sendRequest(runtime, fetchJsonText(`${baseUrl}/policy/kyc?address=${to}`), consensusIdenticalAggregation())()
     .result()
-  const kyc = JSON.parse(kycText) as { isAllowed: boolean; reason: string }
+  const kyc = JSON.parse(kycText) as any
+
+  const complianceMessage = [
+    "GreenReserveComplianceDecision:v1",
+    `address=${String(to).toLowerCase()}`,
+    `isAllowed=${String(Boolean(kyc?.isAllowed))}`,
+    `reason=${String(kyc?.reason ?? "")}`,
+    `evidenceSha256=${String(kyc?.evidence?.sha256 ?? "")}`,
+    `evidenceEtag=${String(kyc?.evidence?.etag ?? "")}`,
+    `evidenceLastModified=${String(kyc?.evidence?.lastModified ?? "")}`,
+    `evidenceSourceUrl=${String(kyc?.evidence?.sourceUrl ?? "")}`,
+  ].join("\n")
+  const complianceDecisionHashBytes32 = keccak256(toBytes(complianceMessage))
 
   let ai: null | {
     memo: { riskScore: number; confidence: number; decision: string; reasons: string[] }
@@ -645,6 +710,11 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
     runtime.log(`ai_risk_memo_error=${(e as Error).message}`)
     return "blocked"
   }
+
+  const aiOutputHashBytes32 =
+    typeof ai?.memoSha256 === "string" && /^[0-9a-fA-F]{64}$/.test(ai.memoSha256)
+      ? (`0x${ai.memoSha256}` as `0x${string}`)
+      : ZERO_BYTES32
 
   const reserveRatioBps = BigInt(reserves.reserveRatioBps)
   const isHealthy = reserveRatioBps >= 10_000n
@@ -677,6 +747,37 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
   }
 
   runtime.log(`approved: reserveRatioBps=${reserveRatioBps.toString()}`)
+
+  const auditRegistryAddress = runtime.config.sepoliaAuditRegistryAddress
+  if (auditRegistryAddress) {
+    const auditRegistryWriteReceiverAddress =
+      runtime.config.sepoliaAuditRegistryWriteReceiverAddress || auditRegistryAddress
+
+    const auditReply = writeAuditRecord(
+      runtime,
+      auditRegistryWriteReceiverAddress as Address,
+      deposit.depositId as `0x${string}`,
+      depositNoticeHashBytes32,
+      reserveAttestationHashBytes32,
+      complianceDecisionHashBytes32,
+      aiOutputHashBytes32
+    )
+
+    runtime.log(
+      `audit_tx_status=${auditReply.txStatus.toString()} txHash=${auditReply.txHash ? bytesToHex(auditReply.txHash) : ""} error=${auditReply.errorMessage ?? ""}`
+    )
+    runtime.log(
+      `audit_receiver_status=${auditReply.receiverContractExecutionStatus?.toString() ?? ""}`
+    )
+
+    if (
+      auditReply.txStatus !== 2 ||
+      (auditReply.receiverContractExecutionStatus !== undefined && auditReply.receiverContractExecutionStatus !== 0)
+    ) {
+      runtime.log("audit_failed_block")
+      return "blocked"
+    }
+  }
 
   const issuerAddress = runtime.config.sepoliaIssuerAddress
   if (!issuerAddress) {
@@ -775,8 +876,8 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
   const fee = readSenderEstimateFee(
     runtime,
     senderAddress as Address,
-    deposit.to as Address,
-    BigInt(deposit.amount),
+    to as Address,
+    BigInt(amountWei),
     deposit.depositId as `0x${string}`
   )
   runtime.log(`ccip_fee_wei=${fee.toString()}`)
@@ -784,8 +885,8 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
   const sendReply = writeSenderSend(
     runtime,
     senderWriteReceiverAddress as Address,
-    deposit.to as Address,
-    BigInt(deposit.amount),
+    to as Address,
+    BigInt(amountWei),
     deposit.depositId as `0x${string}`
   )
 

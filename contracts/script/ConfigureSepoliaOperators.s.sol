@@ -21,7 +21,7 @@ contract ConfigureSepoliaOperators is Script {
     GreenReserveIssuer issuer = GreenReserveIssuer(issuerAddress);
     issuer.setOperator(issuerOperator);
 
-    GreenReserveCCIPSender sender = GreenReserveCCIPSender(senderAddress);
+    GreenReserveCCIPSender sender = GreenReserveCCIPSender(payable(senderAddress));
     sender.setOperator(senderOperator);
 
     vm.stopBroadcast();
