@@ -266,7 +266,6 @@ export const runDepositStatus = async (opts: {
   const baseRpc = opts.baseRpc ?? process.env.BASE_RPC ?? "https://sepolia.base.org"
 
   const sender = cfg.sepoliaSenderAddress ?? ""
-  if (!sender || !isHexAddress(sender)) throw new Error("missing_or_invalid_sepoliaSenderAddress")
 
   const ccipTxHash = (opts.ccipTxHash ?? "").trim()
   if (ccipTxHash && !isHexBytes32(ccipTxHash)) throw new Error("invalid_ccip_tx_hash")
@@ -281,7 +280,7 @@ export const runDepositStatus = async (opts: {
   const sepoliaClient = createPublicClient({ transport: http(sepoliaRpc) })
   const baseClient = createPublicClient({ transport: http(baseRpc) })
 
-  const decodeMessageIdFromTx = async (): Promise<string | null> => {
+  const decodeMessageSentFromTx = async (): Promise<null | { messageId: string; to: string; amountWei: string }> => {
     if (!ccipTxHash) return null
     try {
       const receipt = await sepoliaClient.getTransactionReceipt({ hash: ccipTxHash as any })
@@ -296,9 +295,18 @@ export const runDepositStatus = async (opts: {
           if (decoded?.eventName !== "MessageSent") continue
           if (String(decoded?.args?.depositId ?? "").toLowerCase() !== depositId.toLowerCase()) continue
           const addr = String((log as any).address ?? "")
-          if (addr && addr.toLowerCase() !== sender.toLowerCase()) continue
+          if (sender && isHexAddress(sender) && addr && addr.toLowerCase() !== sender.toLowerCase()) continue
           const mid = String(decoded?.args?.messageId ?? "")
-          return isHexBytes32(mid) ? mid : null
+          const to = String(decoded?.args?.to ?? "")
+          const amount = decoded?.args?.amount as unknown
+
+          const messageId = isHexBytes32(mid) ? mid : ""
+          const amountWei = typeof amount === "bigint" ? amount.toString() : String(amount ?? "")
+          return {
+            messageId,
+            to: isHexAddress(to) ? to : "",
+            amountWei: /^[0-9]+$/.test(amountWei) ? amountWei : "",
+          }
         } catch {
           // ignore non-matching logs
         }
@@ -309,11 +317,31 @@ export const runDepositStatus = async (opts: {
     return null
   }
 
-  const pollOnce = async () => {
-    const dep = await httpGetJson<any>(`${baseUrl}/deposits?depositId=${encodeURIComponent(depositId)}`)
+  let noticeFallback: null | { to: string; amountWei: string } = null
 
-    const to = String(dep?.notice?.onchain?.to ?? "")
-    const amountWei = String(dep?.notice?.amountWei ?? "")
+  const pollOnce = async () => {
+    let to = ""
+    let amountWei = ""
+    let depositNoticeSource: "reserve_api" | "ccip_tx" | null = null
+    let reserveApiError: string | null = null
+
+    try {
+      const dep = await httpGetJson<any>(`${baseUrl}/deposits?depositId=${encodeURIComponent(depositId)}`)
+      to = String(dep?.notice?.onchain?.to ?? "")
+      amountWei = String(dep?.notice?.amountWei ?? "")
+      if (isHexAddress(to) && /^[0-9]+$/.test(amountWei)) {
+        depositNoticeSource = "reserve_api"
+      }
+    } catch (e) {
+      reserveApiError = (e as Error).message
+      if (noticeFallback && noticeFallback.to && noticeFallback.amountWei) {
+        to = noticeFallback.to
+        amountWei = noticeFallback.amountWei
+        depositNoticeSource = "ccip_tx"
+      } else {
+        throw e
+      }
+    }
 
     const issuer = cfg.sepoliaIssuerAddress ?? ""
     const receiver = cfg.baseSepoliaReceiverAddress ?? ""
@@ -381,7 +409,7 @@ export const runDepositStatus = async (opts: {
       tokenBBalance = bal.toString()
     }
 
-    return { to, amountWei, used, processed, tokenBBalance, audit }
+    return { to, amountWei, used, processed, tokenBBalance, audit, depositNoticeSource, reserveApiError }
   }
 
   if (!opts.json) {
@@ -418,16 +446,26 @@ export const runDepositStatus = async (opts: {
   const intervalSec = Number.isFinite(opts.intervalSec) ? (opts.intervalSec as number) : 5
   const watch = Boolean(opts.watch)
 
-  let printedCcip = false
+  let printedCcipTx = false
+  let printedCcipMsg = false
   let seq = 0
 
   while (true) {
-    if (!decodedMessageId && ccipTxHash) {
-      decodedMessageId = (await decodeMessageIdFromTx()) || ""
-      if (decodedMessageId) ccipMsgUrl = `${ccipExplorerBase}/${decodedMessageId}`
+    if ((ccipTxHash && !decodedMessageId) || (ccipTxHash && !noticeFallback)) {
+      const sent = await decodeMessageSentFromTx()
+      if (sent) {
+        if (!decodedMessageId && sent.messageId) {
+          decodedMessageId = sent.messageId
+          ccipMsgUrl = `${ccipExplorerBase}/${decodedMessageId}`
+        }
+
+        if (sent.to && sent.amountWei) {
+          noticeFallback = { to: sent.to, amountWei: sent.amountWei }
+        }
+      }
     }
 
-    const { to, amountWei, used, processed, tokenBBalance, audit } = await pollOnce()
+    const { to, amountWei, used, processed, tokenBBalance, audit, depositNoticeSource, reserveApiError } = await pollOnce()
 
     if (opts.json) {
       seq += 1
@@ -440,6 +478,8 @@ export const runDepositStatus = async (opts: {
           messageId: decodedMessageId || null,
           ccipTxUrl: ccipTxUrl || null,
           ccipMsgUrl: ccipMsgUrl || null,
+          depositNoticeSource,
+          reserveApiError,
           to: to || null,
           amountWei: amountWei || null,
           usedDepositId: used,
@@ -450,13 +490,20 @@ export const runDepositStatus = async (opts: {
         }) + "\n",
       )
     } else {
-      if (!printedCcip) {
+      if (!printedCcipTx) {
         if (ccipTxHash) process.stdout.write(`ccipTxHash=${ccipTxHash}\n`)
-        if (decodedMessageId) process.stdout.write(`ccipMessageId=${decodedMessageId}\n`)
         if (ccipTxUrl) process.stdout.write(`ccipTxExplorer=${ccipTxUrl}\n`)
-        if (ccipMsgUrl) process.stdout.write(`ccipMsgExplorer=${ccipMsgUrl}\n`)
-        printedCcip = true
+        printedCcipTx = true
       }
+
+      if (!printedCcipMsg && decodedMessageId) {
+        process.stdout.write(`ccipMessageId=${decodedMessageId}\n`)
+        if (ccipMsgUrl) process.stdout.write(`ccipMsgExplorer=${ccipMsgUrl}\n`)
+        printedCcipMsg = true
+      }
+
+      if (depositNoticeSource) process.stdout.write(`depositNoticeSource=${depositNoticeSource}\n`)
+      if (reserveApiError) process.stdout.write(`reserveApiError=${reserveApiError}\n`)
 
       if (to) process.stdout.write(`to=${to}\n`)
       if (amountWei) process.stdout.write(`amountWei=${amountWei}\n`)
