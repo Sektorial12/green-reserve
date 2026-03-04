@@ -243,9 +243,11 @@ Bun.serve({
           {
             ok: true,
             model: result.model,
+            promptVersion: result.promptVersion ?? null,
             inputSha256: result.inputSha256,
             memo: result.memo,
             memoSha256: result.memoSha256,
+            external: result.external ?? null,
           },
           undefined,
           req,
@@ -269,9 +271,11 @@ Bun.serve({
           {
             ok: true,
             model: result.model,
+            promptVersion: result.promptVersion ?? null,
             inputSha256: result.inputSha256,
             memo: result.memo,
             memoSha256: result.memoSha256,
+            external: result.external ?? null,
           },
           undefined,
           req,

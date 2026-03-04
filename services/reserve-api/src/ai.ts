@@ -13,26 +13,146 @@ const stripCodeFences = (text: string): string => {
     .trim()
 }
 
-type RiskMemo = {
+const stripCdata = (text: string): string => {
+  return text.replace(/^\s*<!\[CDATA\[(.*)\]\]>\s*$/s, "$1")
+}
+
+const cleanText = (text: string): string => {
+  return stripCdata(text).replace(/\s+/g, " ").trim()
+}
+
+export type RiskMemo = {
   riskScore: number
   confidence: number
   decision: "approve" | "manual_review" | "reject"
   reasons: string[]
 }
 
+export type ExternalRssItem = {
+  title: string
+  link: string
+  published: string
+}
+
+export type ExternalSignals = {
+  rssUrl: string
+  rssSha256: string
+  rssItems: ExternalRssItem[]
+}
+
+export type GenerateRiskMemoResult = {
+  model: string
+  promptVersion: string
+  inputSha256: string
+  memo: RiskMemo
+  memoSha256: string
+  external: ExternalSignals | null
+  createdAtMs: number
+}
+
 type CacheEntry = {
   createdAtMs: number
-  result: {
-    model: string
-    inputSha256: string
-    memo: RiskMemo
-    memoSha256: string
-    createdAtMs: number
+  result: GenerateRiskMemoResult
+}
+
+type ExternalCacheEntry = {
+  createdAtMs: number
+  value: ExternalSignals | null
+}
+
+const externalCache = new Map<string, ExternalCacheEntry>()
+const externalInFlight = new Map<string, Promise<ExternalSignals | null>>()
+
+const fetchWithTimeout = async (url: string, timeoutMs: number): Promise<Response> => {
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    return await fetch(url, { signal: ctrl.signal })
+  } finally {
+    clearTimeout(t)
+  }
+}
+
+const parseRssItems = (xml: string, maxItems: number): ExternalRssItem[] => {
+  const out: ExternalRssItem[] = []
+  const itemBlocks = xml.match(/<item\b[\s\S]*?<\/item>/gi) ?? []
+  for (const block of itemBlocks) {
+    if (out.length >= maxItems) break
+
+    const title = cleanText((block.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "").toString())
+    let link = cleanText((block.match(/<link[^>]*>([\s\S]*?)<\/link>/i)?.[1] ?? "").toString())
+    const pub = cleanText((block.match(/<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i)?.[1] ?? "").toString())
+
+    if (!link) {
+      link = cleanText((block.match(/<guid[^>]*>([\s\S]*?)<\/guid>/i)?.[1] ?? "").toString())
+    }
+
+    if (!title || !link) continue
+    out.push({ title, link, published: pub })
+  }
+
+  if (out.length) return out
+
+  const entryBlocks = xml.match(/<entry\b[\s\S]*?<\/entry>/gi) ?? []
+  for (const block of entryBlocks) {
+    if (out.length >= maxItems) break
+    const title = cleanText((block.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "").toString())
+    const href = block.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*\/>/i)?.[1] ?? ""
+    const link = cleanText(href)
+    const pub = cleanText((block.match(/<updated[^>]*>([\s\S]*?)<\/updated>/i)?.[1] ?? "").toString())
+    if (!title || !link) continue
+    out.push({ title, link, published: pub })
+  }
+
+  return out
+}
+
+const loadExternalSignals = async (): Promise<ExternalSignals | null> => {
+  const rssUrl = (Bun.env.AI_RISK_MEMO_RSS_URL ?? "").trim()
+  if (!rssUrl) return null
+
+  const ttlSec = Number.parseInt(Bun.env.AI_EXTERNAL_CACHE_TTL_SEC ?? "3600", 10)
+  const ttlMs = Number.isFinite(ttlSec) ? ttlSec * 1000 : 3600 * 1000
+  const cached = externalCache.get(rssUrl)
+  if (cached && Date.now() - cached.createdAtMs < ttlMs) return cached.value
+
+  const existing = externalInFlight.get(rssUrl)
+  if (existing) return await existing
+
+  const timeoutMs = Number.parseInt(Bun.env.AI_EXTERNAL_FETCH_TIMEOUT_MS ?? "10000", 10)
+  const maxItems = Number.parseInt(Bun.env.AI_RISK_MEMO_RSS_MAX_ITEMS ?? "5", 10)
+
+  const promise = (async () => {
+    let value: ExternalSignals | null = null
+    try {
+      const resp = await fetchWithTimeout(rssUrl, Number.isFinite(timeoutMs) ? timeoutMs : 10000)
+      if (!resp.ok) {
+        externalCache.set(rssUrl, { createdAtMs: Date.now(), value: null })
+        return null
+      }
+
+      const text = await resp.text()
+      const rssSha256 = await sha256Hex(text)
+      const rssItems = parseRssItems(text, Number.isFinite(maxItems) ? maxItems : 5)
+      value = { rssUrl, rssSha256, rssItems }
+    } catch {
+      value = null
+    }
+
+    externalCache.set(rssUrl, { createdAtMs: Date.now(), value })
+    return value
+  })()
+
+  externalInFlight.set(rssUrl, promise)
+  try {
+    return await promise
+  } finally {
+    externalInFlight.delete(rssUrl)
   }
 }
 
 const cache = new Map<string, CacheEntry>()
-const inFlight = new Map<string, Promise<CacheEntry["result"]>>()
+const inFlight = new Map<string, Promise<GenerateRiskMemoResult>>()
 
 const parseRiskMemo = (raw: unknown): RiskMemo => {
   if (!raw || typeof raw !== "object") throw new Error("invalid_ai_json")
@@ -56,14 +176,23 @@ const parseRiskMemo = (raw: unknown): RiskMemo => {
   }
 }
 
-export const generateRiskMemo = async (input: unknown) => {
+export const generateRiskMemo = async (input: unknown): Promise<GenerateRiskMemoResult> => {
   const apiKey = Bun.env.GEMINI_API_KEY
   if (!apiKey) throw new Error("missing_GEMINI_API_KEY")
 
   const model = Bun.env.GEMINI_MODEL ?? "gemini-1.5-pro"
+  const promptVersion = Bun.env.AI_RISK_MEMO_PROMPT_VERSION ?? "risk_memo_v1"
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
 
-  const inputJson = JSON.stringify(input)
+  const external = await loadExternalSignals()
+  const baseInput = input && typeof input === "object" ? (input as any) : { input }
+  const effectiveInput = {
+    ...baseInput,
+    promptVersion,
+    external,
+  }
+
+  const inputJson = JSON.stringify(effectiveInput)
   const inputSha256 = await sha256Hex(inputJson)
 
   const ttlSec = Number.parseInt(Bun.env.AI_CACHE_TTL_SEC ?? "3600", 10)
@@ -125,9 +254,11 @@ export const generateRiskMemo = async (input: unknown) => {
 
     const result = {
       model,
+      promptVersion,
       inputSha256,
       memo,
       memoSha256,
+      external,
       createdAtMs: Date.now(),
     }
 
