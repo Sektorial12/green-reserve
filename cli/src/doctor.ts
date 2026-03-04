@@ -1,4 +1,4 @@
-import { createPublicClient, http, parseAbi } from "viem"
+import { createPublicClient, hashMessage, http, parseAbi, recoverAddress } from "viem"
 import { asUrlBase, fmtBool, httpGetJson, isHexAddress, lower } from "./util"
 import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config"
 
@@ -17,6 +17,25 @@ const RECEIVER_ABI = parseAbi([
 const SEPOLIA_CHAIN_SELECTOR_ON_BASE = 16015286601757825753n
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000"
 
+const makeReserveAttestationMessage = (a: {
+  asOfTimestamp: number
+  totalReservesUsd: string
+  totalLiabilitiesUsd: string
+  reserveRatioBps: string
+  proofRef: string
+  auditor: string
+}): string => {
+  return [
+    "GreenReserveReserveAttestation:v1",
+    `asOfTimestamp=${a.asOfTimestamp}`,
+    `totalReservesUsd=${a.totalReservesUsd}`,
+    `totalLiabilitiesUsd=${a.totalLiabilitiesUsd}`,
+    `reserveRatioBps=${a.reserveRatioBps}`,
+    `proofRef=${a.proofRef}`,
+    `auditor=${a.auditor.toLowerCase()}`,
+  ].join("\n")
+}
+
 export const runDoctor = async (opts: {
   json?: boolean
   configFile?: string
@@ -34,6 +53,7 @@ export const runDoctor = async (opts: {
 
   const failures: string[] = []
   let sanctionsMeta: any = null
+  let reserves: any = null
 
   const crePath = opts.crePath ?? process.env.CRE_CLI_PATH ?? Bun.which("cre") ?? ""
   if (!crePath) failures.push("missing_cre_cli")
@@ -73,8 +93,66 @@ export const runDoctor = async (opts: {
   }
 
   try {
-    const reserves = await httpGetJson<any>(`${baseUrl}/reserves`)
+    reserves = await httpGetJson<any>(`${baseUrl}/reserves`)
     if (!reserves?.reserveRatioBps) failures.push("reserves_missing_reserveRatioBps")
+
+    const auditor = String(reserves?.auditor ?? "")
+    const proofRef = String(reserves?.proofRef ?? "")
+    const signature = String(reserves?.signature ?? "")
+    const messageHash = String(reserves?.messageHash ?? "")
+    const asOfTimestamp = Number(reserves?.asOfTimestamp)
+    const totalReservesUsd = String(reserves?.totalReservesUsd ?? "")
+    const totalLiabilitiesUsd = String(reserves?.totalLiabilitiesUsd ?? "")
+    const reserveRatioBps = String(reserves?.reserveRatioBps ?? "")
+
+    if (!/^0x[0-9a-fA-F]{40}$/.test(auditor)) failures.push("reserves_missing_or_invalid_auditor")
+    if (!proofRef) failures.push("reserves_missing_or_invalid_proofRef")
+    if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) failures.push("reserves_missing_or_invalid_signature")
+    if (!/^0x[0-9a-fA-F]{64}$/.test(messageHash)) failures.push("reserves_missing_or_invalid_messageHash")
+    if (!Number.isInteger(asOfTimestamp) || asOfTimestamp <= 0) failures.push("reserves_missing_or_invalid_asOfTimestamp")
+    if (!/^[0-9]+$/.test(totalReservesUsd)) failures.push("reserves_missing_or_invalid_totalReservesUsd")
+    if (!/^[0-9]+$/.test(totalLiabilitiesUsd)) failures.push("reserves_missing_or_invalid_totalLiabilitiesUsd")
+    if (!/^[0-9]+$/.test(reserveRatioBps)) failures.push("reserves_missing_or_invalid_reserveRatioBps")
+
+    const expectedAuditor = (process.env.AUDITOR_ADDRESS ?? "").trim()
+    if (expectedAuditor && /^0x[0-9a-fA-F]{40}$/.test(expectedAuditor) && auditor) {
+      if (lower(expectedAuditor) !== lower(auditor)) failures.push("reserves_auditor_mismatch")
+    }
+
+    if (
+      /^0x[0-9a-fA-F]{40}$/.test(auditor) &&
+      /^0x[0-9a-fA-F]{130}$/.test(signature) &&
+      /^0x[0-9a-fA-F]{64}$/.test(messageHash) &&
+      Number.isInteger(asOfTimestamp) &&
+      asOfTimestamp > 0 &&
+      /^[0-9]+$/.test(totalReservesUsd) &&
+      /^[0-9]+$/.test(totalLiabilitiesUsd) &&
+      /^[0-9]+$/.test(reserveRatioBps) &&
+      proofRef
+    ) {
+      const msg = makeReserveAttestationMessage({
+        asOfTimestamp,
+        totalReservesUsd,
+        totalLiabilitiesUsd,
+        reserveRatioBps,
+        proofRef,
+        auditor,
+      })
+      const computedHash = hashMessage(msg)
+      if (lower(computedHash) !== lower(messageHash)) failures.push("reserves_attestation_messageHash_mismatch")
+
+      try {
+        const recovered = await recoverAddress({ hash: computedHash as any, signature: signature as any })
+        if (lower(recovered) !== lower(auditor)) failures.push("reserves_attestation_invalid_signature")
+      } catch (e) {
+        failures.push(`reserves_attestation_verify_failed ${(e as Error).message}`)
+      }
+    }
+
+    if (/^[0-9]+$/.test(reserveRatioBps)) {
+      const ratio = BigInt(reserveRatioBps)
+      if (ratio < 10_000n) failures.push("reserves_insufficient_ratio")
+    }
   } catch (e) {
     failures.push(`reserves_unavailable ${(e as Error).message}`)
   }
@@ -213,6 +291,18 @@ export const runDoctor = async (opts: {
     baseRpc,
     creCli: crePath,
     sanctions: sanctionsMeta?.lists ?? undefined,
+    reserves: reserves
+      ? {
+          asOfTimestamp: reserves.asOfTimestamp ?? null,
+          totalReservesUsd: reserves.totalReservesUsd ?? null,
+          totalLiabilitiesUsd: reserves.totalLiabilitiesUsd ?? null,
+          reserveRatioBps: reserves.reserveRatioBps ?? null,
+          proofRef: reserves.proofRef ?? null,
+          auditor: reserves.auditor ?? null,
+          signature: reserves.signature ?? null,
+          messageHash: reserves.messageHash ?? null,
+        }
+      : null,
     issuer: issuer || undefined,
     issuerWriteReceiver: issuerWr || undefined,
     sender: sender || undefined,
@@ -239,6 +329,14 @@ export const runDoctor = async (opts: {
   process.stdout.write(`sepoliaRpc=${sepoliaRpc}\n`)
   process.stdout.write(`baseRpc=${baseRpc}\n`)
   process.stdout.write(`creCli=${crePath}\n`)
+
+  if (reserves) {
+    if (reserves?.reserveRatioBps) process.stdout.write(`reserveRatioBps=${String(reserves.reserveRatioBps)}\n`)
+    if (reserves?.asOfTimestamp) process.stdout.write(`reserveAsOfTimestamp=${String(reserves.asOfTimestamp)}\n`)
+    if (reserves?.auditor) process.stdout.write(`reserveAuditor=${String(reserves.auditor)}\n`)
+    if (reserves?.proofRef) process.stdout.write(`reserveProofRef=${String(reserves.proofRef)}\n`)
+    if (reserves?.messageHash) process.stdout.write(`reserveMessageHash=${String(reserves.messageHash)}\n`)
+  }
 
   if (sanctionsMeta?.lists && typeof sanctionsMeta.lists === "object") {
     const listOrder = ["ofac_sdn_advanced", "eu_consolidated", "uk_sanctions_list"]
