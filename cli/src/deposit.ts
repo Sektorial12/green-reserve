@@ -19,17 +19,28 @@ const AUDIT_REGISTRY_ABI = parseAbi([
 type DepositNotice = {
   version: string
   custodian: string
+  asset?: {
+    type?: string
+    registry?: string
+    projectId?: string
+  }
+  fiat?: {
+    currency?: string
+    amount?: string
+  }
   onchain: {
     to: string
     chain: string
   }
   amountWei: string
   timestamp: number
+  evidenceUrl?: string
 }
 
 const makeDepositNoticeMessage = (n: DepositNotice, custodianAddress: string): string => {
+  const isV2 = n.version === "2"
   return [
-    "GreenReserveDepositNotice:v1",
+    isV2 ? "GreenReserveDepositNotice:v2" : "GreenReserveDepositNotice:v1",
     `version=${n.version}`,
     `custodian=${n.custodian}`,
     `to=${n.onchain.to.toLowerCase()}`,
@@ -37,6 +48,16 @@ const makeDepositNoticeMessage = (n: DepositNotice, custodianAddress: string): s
     `amountWei=${n.amountWei}`,
     `timestamp=${n.timestamp}`,
     `custodianAddress=${custodianAddress.toLowerCase()}`,
+    ...(isV2
+      ? [
+          `assetType=${String(n.asset?.type ?? "")}`,
+          `assetRegistry=${String(n.asset?.registry ?? "")}`,
+          `assetProjectId=${String(n.asset?.projectId ?? "")}`,
+          `fiatCurrency=${String(n.fiat?.currency ?? "")}`,
+          `fiatAmount=${String(n.fiat?.amount ?? "")}`,
+          `evidenceUrl=${String(n.evidenceUrl ?? "")}`,
+        ]
+      : []),
   ].join("\n")
 }
 
@@ -46,10 +67,17 @@ export const runDepositCreate = async (opts: {
   reserveApiBaseUrl?: string
   crePath?: string
   nonInteractive?: boolean
+  noticeVersion?: string
   to?: string
   amountEth?: string
   chain?: string
   custodian?: string
+  assetType?: string
+  assetRegistry?: string
+  assetProjectId?: string
+  fiatCurrency?: string
+  fiatAmount?: string
+  evidenceUrl?: string
   custodianPrivateKey?: string
 }) => {
   const configPath = opts.configFile ?? defaultWorkflowConfigPath()
@@ -120,12 +148,44 @@ export const runDepositCreate = async (opts: {
   const custodian = String(answers.custodian ?? initialCustodian).trim()
   if (!custodian) throw new Error("invalid_custodian")
 
+  const requestedVersion = String(opts.noticeVersion ?? "").trim()
+  if (requestedVersion && requestedVersion !== "1" && requestedVersion !== "2") {
+    throw new Error("invalid_notice_version")
+  }
+
+  const hasExtendedFields = Boolean(
+    (opts.assetType ?? "").trim() ||
+      (opts.assetRegistry ?? "").trim() ||
+      (opts.assetProjectId ?? "").trim() ||
+      (opts.fiatCurrency ?? "").trim() ||
+      (opts.fiatAmount ?? "").trim() ||
+      (opts.evidenceUrl ?? "").trim(),
+  )
+
+  const noticeVersion = requestedVersion || (hasExtendedFields ? "2" : "1")
+  if (noticeVersion !== "1" && noticeVersion !== "2") throw new Error("invalid_notice_version")
+  if (noticeVersion === "1" && hasExtendedFields) throw new Error("notice_version_required_for_extended_fields")
+
   const notice: DepositNotice = {
-    version: "1",
+    version: noticeVersion,
     custodian,
     onchain: { to, chain },
     amountWei,
     timestamp: Math.floor(Date.now() / 1000),
+    ...(noticeVersion === "2"
+      ? {
+          asset: {
+            type: (opts.assetType ?? "").trim() || undefined,
+            registry: (opts.assetRegistry ?? "").trim() || undefined,
+            projectId: (opts.assetProjectId ?? "").trim() || undefined,
+          },
+          fiat: {
+            currency: (opts.fiatCurrency ?? "").trim() || undefined,
+            amount: (opts.fiatAmount ?? "").trim() || undefined,
+          },
+          evidenceUrl: (opts.evidenceUrl ?? "").trim() || undefined,
+        }
+      : {}),
   }
 
   const message = makeDepositNoticeMessage(notice, account.address)

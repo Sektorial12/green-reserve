@@ -21,8 +21,11 @@ import {
   type Address,
   decodeFunctionResult,
   encodeFunctionData,
+  hashMessage,
   keccak256,
   parseAbi,
+  recoverAddress,
+  sha256,
   toBytes,
   zeroAddress,
 } from "viem"
@@ -60,12 +63,32 @@ const depositApiResponseSchema = z
     ok: z.literal(true),
     depositId: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
     notice: z.object({
+      version: z.enum(["1", "2"]),
+      custodian: z.string(),
+      asset: z
+        .object({
+          type: z.string().optional(),
+          registry: z.string().optional(),
+          projectId: z.string().optional(),
+        })
+        .optional(),
+      fiat: z
+        .object({
+          currency: z.string().optional(),
+          amount: z.string().optional(),
+        })
+        .optional(),
       onchain: z.object({
         to: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+        chain: z.string(),
       }),
       amountWei: z.string().regex(/^[0-9]+$/),
+      timestamp: z.number().int().positive(),
+      evidenceUrl: z.string().optional(),
     }),
-    messageHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional(),
+    custodianAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+    messageHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+    signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/).nullable().optional(),
   })
   .passthrough()
 
@@ -73,10 +96,14 @@ type DepositApiResponse = z.infer<typeof depositApiResponseSchema>
 
 const reservesApiResponseSchema = z
   .object({
+    asOfTimestamp: z.number().int().positive(),
+    totalReservesUsd: z.string().regex(/^[0-9]+$/),
+    totalLiabilitiesUsd: z.string().regex(/^[0-9]+$/),
     reserveRatioBps: z.string().regex(/^[0-9]+$/),
-    auditor: z.string().optional(),
-    proofRef: z.string().optional(),
-    messageHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional(),
+    proofRef: z.string(),
+    auditor: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+    signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+    messageHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
   })
   .passthrough()
 
@@ -125,6 +152,45 @@ const safeJsonParse = (textValue: string): unknown => {
   } catch {
     throw new Error("invalid_json")
   }
+}
+
+const makeDepositNoticeMessage = (
+  n: DepositApiResponse["notice"],
+  custodianAddress: string,
+): string => {
+  const isV2 = n.version === "2"
+  return [
+    isV2 ? "GreenReserveDepositNotice:v2" : "GreenReserveDepositNotice:v1",
+    `version=${n.version}`,
+    `custodian=${n.custodian}`,
+    `to=${n.onchain.to.toLowerCase()}`,
+    `chain=${n.onchain.chain}`,
+    `amountWei=${n.amountWei}`,
+    `timestamp=${n.timestamp}`,
+    `custodianAddress=${custodianAddress.toLowerCase()}`,
+    ...(isV2
+      ? [
+          `assetType=${String(n.asset?.type ?? "")}`,
+          `assetRegistry=${String(n.asset?.registry ?? "")}`,
+          `assetProjectId=${String(n.asset?.projectId ?? "")}`,
+          `fiatCurrency=${String(n.fiat?.currency ?? "")}`,
+          `fiatAmount=${String(n.fiat?.amount ?? "")}`,
+          `evidenceUrl=${String(n.evidenceUrl ?? "")}`,
+        ]
+      : []),
+  ].join("\n")
+}
+
+const makeReserveAttestationMessage = (r: ReservesApiResponse): string => {
+  return [
+    "GreenReserveReserveAttestation:v1",
+    `asOfTimestamp=${r.asOfTimestamp}`,
+    `totalReservesUsd=${r.totalReservesUsd}`,
+    `totalLiabilitiesUsd=${r.totalLiabilitiesUsd}`,
+    `reserveRatioBps=${r.reserveRatioBps}`,
+    `proofRef=${r.proofRef}`,
+    `auditor=${r.auditor.toLowerCase()}`,
+  ].join("\n")
 }
 
 const ROUTER_ABI = parseAbi(["function isChainSupported(uint64 chainSelector) view returns (bool)"])
@@ -683,7 +749,7 @@ const writeSenderSend = (runtime: Runtime<Config>, senderWriteReceiverAddress: A
     .result()
 }
 
-const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => {
+const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => {
   let deposit: DepositPayload
   try {
     deposit = parseDepositPayload(triggerOutput)
@@ -717,12 +783,41 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
 
   const to = dep.notice.onchain.to
   const amountWei = dep.notice.amountWei
-  const depositNoticeHash = dep.messageHash
 
-  const depositNoticeHashBytes32 =
-    typeof depositNoticeHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(depositNoticeHash)
-      ? (depositNoticeHash as `0x${string}`)
-      : ZERO_BYTES32
+  if (!dep.signature) {
+    runtime.log("blocked: reason=deposit_notice_missing_signature")
+    return "blocked"
+  }
+
+  const depositMessage = makeDepositNoticeMessage(dep.notice, dep.custodianAddress)
+  const depositMessageHash = hashMessage(depositMessage)
+  if (depositMessageHash.toLowerCase() !== dep.messageHash.toLowerCase()) {
+    runtime.log("blocked: reason=deposit_notice_messageHash_mismatch")
+    return "blocked"
+  }
+
+  let recoveredCustodian: string
+  try {
+    recoveredCustodian = await recoverAddress({
+      hash: depositMessageHash,
+      signature: dep.signature as `0x${string}`,
+    })
+  } catch (e) {
+    runtime.log(`blocked: reason=deposit_notice_invalid_signature error=${(e as Error).message}`)
+    return "blocked"
+  }
+  if (recoveredCustodian.toLowerCase() !== dep.custodianAddress.toLowerCase()) {
+    runtime.log("blocked: reason=deposit_notice_invalid_signature")
+    return "blocked"
+  }
+
+  const depositIdFromMessage = sha256(toBytes(depositMessage))
+  if (depositIdFromMessage.toLowerCase() !== dep.depositId.toLowerCase()) {
+    runtime.log("blocked: reason=deposit_notice_depositId_hash_mismatch")
+    return "blocked"
+  }
+
+  const depositNoticeHashBytes32 = depositMessageHash as `0x${string}`
 
   runtime.log(`depositId=${deposit.depositId} to=${to} amount=${amountWei}`)
 
@@ -737,10 +832,29 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
     return "blocked"
   }
 
-  const reserveAttestationHashBytes32 =
-    typeof reserves.messageHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(reserves.messageHash)
-      ? (reserves.messageHash as `0x${string}`)
-      : ZERO_BYTES32
+  const reservesMessage = makeReserveAttestationMessage(reserves)
+  const reservesMessageHash = hashMessage(reservesMessage)
+  if (reservesMessageHash.toLowerCase() !== reserves.messageHash.toLowerCase()) {
+    runtime.log("blocked: reason=reserves_messageHash_mismatch")
+    return "blocked"
+  }
+
+  let recoveredAuditor: string
+  try {
+    recoveredAuditor = await recoverAddress({
+      hash: reservesMessageHash,
+      signature: reserves.signature as `0x${string}`,
+    })
+  } catch (e) {
+    runtime.log(`blocked: reason=reserves_invalid_signature error=${(e as Error).message}`)
+    return "blocked"
+  }
+  if (recoveredAuditor.toLowerCase() !== reserves.auditor.toLowerCase()) {
+    runtime.log("blocked: reason=reserves_invalid_signature")
+    return "blocked"
+  }
+
+  const reserveAttestationHashBytes32 = reservesMessageHash as `0x${string}`
 
   if (reserves.auditor || reserves.proofRef || reserves.messageHash) {
     runtime.log(
@@ -811,10 +925,20 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
     return "blocked"
   }
 
-  const aiOutputHashBytes32 =
-    typeof ai?.memoSha256 === "string" && /^[0-9a-fA-F]{64}$/.test(ai.memoSha256)
-      ? (`0x${ai.memoSha256}` as `0x${string}`)
-      : ZERO_BYTES32
+  const aiOutputHashBytes32 = (() => {
+    if (!ai?.memoSha256 || !/^[0-9a-fA-F]{64}$/.test(ai.memoSha256)) return ZERO_BYTES32
+    const msg = [
+      "GreenReserveAiOutputCommit:v1",
+      `depositId=${deposit.depositId.toLowerCase()}`,
+      `memoSha256=${ai.memoSha256.toLowerCase()}`,
+      `model=${String(ai.model ?? "")}`,
+      `promptVersion=${String(ai.promptVersion ?? "")}`,
+      `inputSha256=${String(ai.inputSha256 ?? "")}`,
+      `externalRssSha256=${String(ai.externalRssSha256 ?? "")}`,
+      `externalRssUrl=${String(ai.externalRssUrl ?? "")}`,
+    ].join("\n")
+    return sha256(toBytes(msg)) as `0x${string}`
+  })()
 
   let reserveRatioBps: bigint
   try {

@@ -42,12 +42,22 @@ const sha256Hex = async (text: string): Promise<string> => {
 type DepositNotice = {
   version: string
   custodian: string
+  asset?: {
+    type?: string
+    registry?: string
+    projectId?: string
+  }
+  fiat?: {
+    currency?: string
+    amount?: string
+  }
   onchain: {
     to: string
     chain: string
   }
   amountWei: string
   timestamp: number
+  evidenceUrl?: string
 }
 
 const isHexBytes32 = (s: string) => /^0x[0-9a-fA-F]{64}$/.test(s)
@@ -55,24 +65,49 @@ const isHexBytes32 = (s: string) => /^0x[0-9a-fA-F]{64}$/.test(s)
 const parseDepositNotice = (raw: any): DepositNotice => {
   if (!raw || typeof raw !== "object") throw new Error("invalid_notice")
   if (typeof raw.version !== "string" || raw.version.length === 0) throw new Error("invalid_version")
+  if (raw.version !== "1" && raw.version !== "2") throw new Error("invalid_version")
   if (typeof raw.custodian !== "string" || raw.custodian.length === 0) throw new Error("invalid_custodian")
+
+  if (raw.version === "1") {
+    if (raw.asset !== undefined) throw new Error("invalid_asset")
+    if (raw.fiat !== undefined) throw new Error("invalid_fiat")
+    if (raw.evidenceUrl !== undefined) throw new Error("invalid_evidenceUrl")
+  }
+
+  if (raw.asset !== undefined) {
+    if (!raw.asset || typeof raw.asset !== "object") throw new Error("invalid_asset")
+    if (raw.asset.type !== undefined && typeof raw.asset.type !== "string") throw new Error("invalid_asset_type")
+    if (raw.asset.registry !== undefined && typeof raw.asset.registry !== "string") throw new Error("invalid_asset_registry")
+    if (raw.asset.projectId !== undefined && typeof raw.asset.projectId !== "string") throw new Error("invalid_asset_projectId")
+  }
+  if (raw.fiat !== undefined) {
+    if (!raw.fiat || typeof raw.fiat !== "object") throw new Error("invalid_fiat")
+    if (raw.fiat.currency !== undefined && typeof raw.fiat.currency !== "string") throw new Error("invalid_fiat_currency")
+    if (raw.fiat.amount !== undefined && typeof raw.fiat.amount !== "string") throw new Error("invalid_fiat_amount")
+  }
+
   if (!raw.onchain || typeof raw.onchain !== "object") throw new Error("invalid_onchain")
   if (typeof raw.onchain.to !== "string" || !isHexAddress(raw.onchain.to.toLowerCase())) throw new Error("invalid_to")
   if (typeof raw.onchain.chain !== "string" || raw.onchain.chain.length === 0) throw new Error("invalid_chain")
   if (typeof raw.amountWei !== "string" || !/^[0-9]+$/.test(raw.amountWei)) throw new Error("invalid_amountWei")
   if (!Number.isInteger(raw.timestamp) || raw.timestamp <= 0) throw new Error("invalid_timestamp")
+  if (raw.evidenceUrl !== undefined && typeof raw.evidenceUrl !== "string") throw new Error("invalid_evidenceUrl")
   return {
     version: raw.version,
     custodian: raw.custodian,
+    asset: raw.asset,
+    fiat: raw.fiat,
     onchain: { to: raw.onchain.to.toLowerCase(), chain: raw.onchain.chain },
     amountWei: raw.amountWei,
     timestamp: raw.timestamp,
+    evidenceUrl: raw.evidenceUrl,
   }
 }
 
 const makeDepositNoticeMessage = (n: DepositNotice, custodianAddress: string): string => {
+  const isV2 = n.version === "2"
   return [
-    "GreenReserveDepositNotice:v1",
+    isV2 ? "GreenReserveDepositNotice:v2" : "GreenReserveDepositNotice:v1",
     `version=${n.version}`,
     `custodian=${n.custodian}`,
     `to=${n.onchain.to.toLowerCase()}`,
@@ -80,6 +115,16 @@ const makeDepositNoticeMessage = (n: DepositNotice, custodianAddress: string): s
     `amountWei=${n.amountWei}`,
     `timestamp=${n.timestamp}`,
     `custodianAddress=${custodianAddress.toLowerCase()}`,
+    ...(isV2
+      ? [
+          `assetType=${String(n.asset?.type ?? "")}`,
+          `assetRegistry=${String(n.asset?.registry ?? "")}`,
+          `assetProjectId=${String(n.asset?.projectId ?? "")}`,
+          `fiatCurrency=${String(n.fiat?.currency ?? "")}`,
+          `fiatAmount=${String(n.fiat?.amount ?? "")}`,
+          `evidenceUrl=${String(n.evidenceUrl ?? "")}`,
+        ]
+      : []),
   ].join("\n")
 }
 
@@ -309,6 +354,7 @@ Bun.serve({
           notice: item.notice,
           custodianAddress: item.custodianAddress,
           messageHash: item.messageHash,
+          signature: item.signature ?? null,
           hasSignature: Boolean(item.signature),
         },
         undefined,

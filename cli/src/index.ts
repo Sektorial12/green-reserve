@@ -46,10 +46,17 @@ const main = async () => {
     .option("--reserve-api-base-url <url>")
     .option("--cre-path <path>")
     .option("--non-interactive")
+    .option("--notice-version <1|2>")
     .option("--to <address>")
     .option("--amount-eth <eth>")
     .option("--chain <name>")
     .option("--custodian <name>")
+    .option("--asset-type <type>")
+    .option("--asset-registry <registry>")
+    .option("--asset-project-id <id>")
+    .option("--fiat-currency <code>")
+    .option("--fiat-amount <amount>")
+    .option("--evidence-url <url>")
     .option("--custodian-private-key <hex>")
     .action(async (opts) => {
       await runJsonSafe(Boolean(opts.json), async () => {
@@ -59,10 +66,17 @@ const main = async () => {
           reserveApiBaseUrl: opts.reserveApiBaseUrl,
           nonInteractive: Boolean(opts.nonInteractive),
           crePath: opts.crePath,
+          noticeVersion: opts.noticeVersion,
           to: opts.to,
           amountEth: opts.amountEth,
           chain: opts.chain,
           custodian: opts.custodian,
+          assetType: opts.assetType,
+          assetRegistry: opts.assetRegistry,
+          assetProjectId: opts.assetProjectId,
+          fiatCurrency: opts.fiatCurrency,
+          fiatAmount: opts.fiatAmount,
+          evidenceUrl: opts.evidenceUrl,
           custodianPrivateKey: opts.custodianPrivateKey,
         })
       })
