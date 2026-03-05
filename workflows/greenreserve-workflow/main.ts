@@ -47,13 +47,85 @@ const configSchema = z.object({
 type Config = z.infer<typeof configSchema>
 
 const depositSchema = z.object({
-  depositId: z.string(),
+  depositId: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
   to: z.string().optional(),
   amount: z.string().optional(),
   scenario: z.enum(["healthy", "unhealthy"]).optional(),
 })
 
 type DepositPayload = z.infer<typeof depositSchema>
+
+const depositApiResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    depositId: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+    notice: z.object({
+      onchain: z.object({
+        to: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+      }),
+      amountWei: z.string().regex(/^[0-9]+$/),
+    }),
+    messageHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional(),
+  })
+  .passthrough()
+
+type DepositApiResponse = z.infer<typeof depositApiResponseSchema>
+
+const reservesApiResponseSchema = z
+  .object({
+    reserveRatioBps: z.string().regex(/^[0-9]+$/),
+    auditor: z.string().optional(),
+    proofRef: z.string().optional(),
+    messageHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional(),
+  })
+  .passthrough()
+
+type ReservesApiResponse = z.infer<typeof reservesApiResponseSchema>
+
+const kycApiResponseSchema = z
+  .object({
+    isAllowed: z.boolean(),
+    reason: z.string().optional(),
+    ruleId: z.string().optional(),
+    evidence: z.unknown().optional(),
+  })
+  .passthrough()
+
+type KycApiResponse = z.infer<typeof kycApiResponseSchema>
+
+const aiRiskMemoResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    memo: z.object({
+      riskScore: z.number().int().min(0).max(100),
+      confidence: z.number().min(0).max(1),
+      decision: z.enum(["approve", "manual_review", "reject"]),
+      reasons: z.array(z.string()),
+    }),
+    memoSha256: z.string().regex(/^[0-9a-fA-F]{64}$/),
+    inputSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+    model: z.string().optional(),
+    promptVersion: z.string().optional(),
+    external: z
+      .object({
+        rssUrl: z.string().optional(),
+        rssSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
+
+type AiRiskMemoResponse = z.infer<typeof aiRiskMemoResponseSchema>
+
+const safeJsonParse = (textValue: string): unknown => {
+  try {
+    return JSON.parse(textValue)
+  } catch {
+    throw new Error("invalid_json")
+  }
+}
 
 const ROUTER_ABI = parseAbi(["function isChainSupported(uint64 chainSelector) view returns (bool)"])
 
@@ -131,14 +203,12 @@ const writeAuditRecord = (
 }
 
 const parseConfig = (configBytes: Uint8Array): Config => {
-  const parsed = JSON.parse(bytesToAscii(configBytes))
-  return configSchema.parse(parsed)
+  return configSchema.parse(safeJsonParse(bytesToAscii(configBytes)))
 }
 
 const parseDepositPayload = (triggerOutput: HTTPPayload): DepositPayload => {
   const raw = bytesToAscii(triggerOutput.input)
-  const parsed = JSON.parse(raw)
-  return depositSchema.parse(parsed)
+  return depositSchema.parse(safeJsonParse(raw))
 }
 
 const fetchJsonText = (url: string) => (sendRequester: any) => {
@@ -614,27 +684,40 @@ const writeSenderSend = (runtime: Runtime<Config>, senderWriteReceiverAddress: A
 }
 
 const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => {
-  const deposit = parseDepositPayload(triggerOutput)
+  let deposit: DepositPayload
+  try {
+    deposit = parseDepositPayload(triggerOutput)
+  } catch {
+    runtime.log("blocked: reason=invalid_trigger_payload")
+    return "blocked"
+  }
   const http = new cre.capabilities.HTTPClient()
   const baseUrl = runtime.config.reserveApiBaseUrl.replace(/\/$/, "")
 
-  const depText = http
-    .sendRequest(
-      runtime,
-      fetchJsonText(`${baseUrl}/deposits?depositId=${encodeURIComponent(deposit.depositId)}`),
-      consensusIdenticalAggregation()
-    )()
-    .result()
+  let dep: DepositApiResponse
+  try {
+    const depText = http
+      .sendRequest(
+        runtime,
+        fetchJsonText(`${baseUrl}/deposits?depositId=${encodeURIComponent(deposit.depositId)}`),
+        consensusIdenticalAggregation()
+      )()
+      .result()
 
-  const dep = JSON.parse(depText) as any
-  const to = dep?.notice?.onchain?.to
-  const amountWei = dep?.notice?.amountWei
-  const depositNoticeHash = dep?.messageHash
-
-  if (typeof to !== "string" || typeof amountWei !== "string") {
-    runtime.log("blocked: reason=deposit_notice_missing")
+    dep = depositApiResponseSchema.parse(safeJsonParse(depText))
+  } catch (e) {
+    runtime.log(`blocked: reason=deposit_notice_unavailable error=${(e as Error).message}`)
     return "blocked"
   }
+
+  if (dep.depositId.toLowerCase() !== deposit.depositId.toLowerCase()) {
+    runtime.log("blocked: reason=deposit_notice_depositId_mismatch")
+    return "blocked"
+  }
+
+  const to = dep.notice.onchain.to
+  const amountWei = dep.notice.amountWei
+  const depositNoticeHash = dep.messageHash
 
   const depositNoticeHashBytes32 =
     typeof depositNoticeHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(depositNoticeHash)
@@ -643,14 +726,15 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
 
   runtime.log(`depositId=${deposit.depositId} to=${to} amount=${amountWei}`)
 
-  const reservesText = http
-    .sendRequest(runtime, fetchJsonText(`${baseUrl}/reserves`), consensusIdenticalAggregation())()
-    .result()
-  const reserves = JSON.parse(reservesText) as {
-    reserveRatioBps: string
-    auditor?: string
-    proofRef?: string
-    messageHash?: string
+  let reserves: ReservesApiResponse
+  try {
+    const reservesText = http
+      .sendRequest(runtime, fetchJsonText(`${baseUrl}/reserves`), consensusIdenticalAggregation())()
+      .result()
+    reserves = reservesApiResponseSchema.parse(safeJsonParse(reservesText))
+  } catch (e) {
+    runtime.log(`blocked: reason=reserves_unavailable error=${(e as Error).message}`)
+    return "blocked"
   }
 
   const reserveAttestationHashBytes32 =
@@ -664,25 +748,31 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
     )
   }
 
-  const kycText = http
-    .sendRequest(runtime, fetchJsonText(`${baseUrl}/policy/kyc?address=${to}`), consensusIdenticalAggregation())()
-    .result()
-  const kyc = JSON.parse(kycText) as any
+  let kyc: KycApiResponse
+  try {
+    const kycText = http
+      .sendRequest(runtime, fetchJsonText(`${baseUrl}/policy/kyc?address=${to}`), consensusIdenticalAggregation())()
+      .result()
+    kyc = kycApiResponseSchema.parse(safeJsonParse(kycText))
+  } catch (e) {
+    runtime.log(`blocked: reason=kyc_unavailable error=${(e as Error).message}`)
+    return "blocked"
+  }
 
   const complianceMessage = [
     "GreenReserveComplianceDecision:v1",
     `address=${String(to).toLowerCase()}`,
-    `isAllowed=${String(Boolean(kyc?.isAllowed))}`,
-    `reason=${String(kyc?.reason ?? "")}`,
-    `ruleId=${String(kyc?.ruleId ?? "")}`,
-    `evidenceListId=${String(kyc?.evidence?.matchedList ?? kyc?.evidence?.primaryList ?? "")}`,
-    `evidenceOfacSha256=${String(kyc?.evidence?.lists?.ofac_sdn_advanced?.sha256 ?? "")}`,
-    `evidenceEuSha256=${String(kyc?.evidence?.lists?.eu_consolidated?.sha256 ?? "")}`,
-    `evidenceUkSha256=${String(kyc?.evidence?.lists?.uk_sanctions_list?.sha256 ?? "")}`,
-    `evidenceSha256=${String(kyc?.evidence?.sha256 ?? "")}`,
-    `evidenceEtag=${String(kyc?.evidence?.etag ?? "")}`,
-    `evidenceLastModified=${String(kyc?.evidence?.lastModified ?? "")}`,
-    `evidenceSourceUrl=${String(kyc?.evidence?.sourceUrl ?? "")}`,
+    `isAllowed=${String(Boolean(kyc.isAllowed))}`,
+    `reason=${String(kyc.reason ?? "")}`,
+    `ruleId=${String(kyc.ruleId ?? "")}`,
+    `evidenceListId=${String((kyc as any)?.evidence?.matchedList ?? (kyc as any)?.evidence?.primaryList ?? "")}`,
+    `evidenceOfacSha256=${String((kyc as any)?.evidence?.lists?.ofac_sdn_advanced?.sha256 ?? "")}`,
+    `evidenceEuSha256=${String((kyc as any)?.evidence?.lists?.eu_consolidated?.sha256 ?? "")}`,
+    `evidenceUkSha256=${String((kyc as any)?.evidence?.lists?.uk_sanctions_list?.sha256 ?? "")}`,
+    `evidenceSha256=${String((kyc as any)?.evidence?.sha256 ?? "")}`,
+    `evidenceEtag=${String((kyc as any)?.evidence?.etag ?? "")}`,
+    `evidenceLastModified=${String((kyc as any)?.evidence?.lastModified ?? "")}`,
+    `evidenceSourceUrl=${String((kyc as any)?.evidence?.sourceUrl ?? "")}`,
   ].join("\n")
   const complianceDecisionHashBytes32 = keccak256(toBytes(complianceMessage))
 
@@ -705,21 +795,19 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
     const aiText = http
       .sendRequest(runtime, fetchJsonText(aiUrl), consensusIdenticalAggregation())()
       .result()
-    const parsed = JSON.parse(aiText) as any
-    if (parsed && parsed.ok && parsed.memo && parsed.memoSha256) {
-      const external = parsed.external && typeof parsed.external === "object" ? parsed.external : null
-      ai = {
-        memo: parsed.memo,
-        memoSha256: parsed.memoSha256,
-        inputSha256: parsed.inputSha256 ?? "",
-        model: parsed.model ?? "",
-        promptVersion: parsed.promptVersion ?? "",
-        externalRssSha256: external?.rssSha256 ?? "",
-        externalRssUrl: external?.rssUrl ?? "",
-      }
+    const parsed = aiRiskMemoResponseSchema.parse(safeJsonParse(aiText))
+    const external = parsed.external && typeof parsed.external === "object" ? parsed.external : null
+    ai = {
+      memo: parsed.memo,
+      memoSha256: parsed.memoSha256,
+      inputSha256: parsed.inputSha256 ?? "",
+      model: parsed.model ?? "",
+      promptVersion: parsed.promptVersion ?? "",
+      externalRssSha256: (external as any)?.rssSha256 ?? "",
+      externalRssUrl: (external as any)?.rssUrl ?? "",
     }
   } catch (e) {
-    runtime.log(`ai_risk_memo_error=${(e as Error).message}`)
+    runtime.log(`blocked: reason=ai_unavailable error=${(e as Error).message}`)
     return "blocked"
   }
 
@@ -728,14 +816,24 @@ const onHttpTrigger = (runtime: Runtime<Config>, triggerOutput: HTTPPayload) => 
       ? (`0x${ai.memoSha256}` as `0x${string}`)
       : ZERO_BYTES32
 
-  const reserveRatioBps = BigInt(reserves.reserveRatioBps)
+  let reserveRatioBps: bigint
+  try {
+    reserveRatioBps = BigInt(reserves.reserveRatioBps)
+  } catch {
+    runtime.log("blocked: reason=reserves_invalid_reserveRatioBps")
+    return "blocked"
+  }
   const isHealthy = reserveRatioBps >= 10_000n
 
-  const chainSupported = readRouterIsChainSupported(runtime)
-  runtime.log(`sepoliaRouterSupportsDest=${chainSupported.toString()}`)
+  try {
+    const chainSupported = readRouterIsChainSupported(runtime)
+    runtime.log(`sepoliaRouterSupportsDest=${chainSupported.toString()}`)
+  } catch (e) {
+    runtime.log(`sepoliaRouterSupportsDest_error=${(e as Error).message}`)
+  }
 
   if (!kyc.isAllowed) {
-    runtime.log(`blocked: reason=${kyc.reason}`)
+    runtime.log(`blocked: reason=${kyc.reason ?? "kyc_denied"}`)
     return "blocked"
   }
 
