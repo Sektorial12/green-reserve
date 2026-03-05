@@ -23,6 +23,22 @@ require_cmd cre
 require_cmd cast
 require_cmd node
 
+USE_TS_CLI="${USE_TS_CLI:-1}"
+
+GREENRESERVE_CMD=()
+CLI_DIR="$REPO_ROOT/cli"
+if [[ "$USE_TS_CLI" == "1" ]]; then
+  if command -v greenreserve >/dev/null 2>&1; then
+    GREENRESERVE_CMD=(greenreserve)
+  elif command -v bun >/dev/null 2>&1 && [[ -f "$CLI_DIR/src/index.ts" ]]; then
+    if [[ ! -d "$CLI_DIR/node_modules" ]]; then
+      echo "warning: greenreserve TS CLI dependencies not installed; run: (cd cli && bun install)"
+    else
+      GREENRESERVE_CMD=(bun "$CLI_DIR/src/index.ts")
+    fi
+  fi
+fi
+
 cast_uint() {
   if [[ "$#" -gt 0 ]]; then
     echo "$1" | tr -d '\r' | awk '{print $1}'
@@ -201,46 +217,85 @@ if [[ -z "${DEPOSIT_ID:-}" ]]; then
   CHAIN_NAME="${CHAIN_NAME:-base-sepolia}"
   CUSTODIAN_PRIVATE_KEY="${CUSTODIAN_PRIVATE_KEY:-$CRE_ETH_PRIVATE_KEY}"
   CUSTODIAN_ADDR="$(cast wallet address --private-key "$CUSTODIAN_PRIVATE_KEY")"
-  for _ in 1 2 3 4 5; do
-    TS_NOW="$(date +%s)"
-    TO_LC="$(lower "$TO")"
-    CUSTODIAN_ADDR_LC="$(lower "$CUSTODIAN_ADDR")"
-    NOTICE_MESSAGE="$(printf 'GreenReserveDepositNotice:v1\nversion=%s\ncustodian=%s\nto=%s\nchain=%s\namountWei=%s\ntimestamp=%s\ncustodianAddress=%s' \
-      "1" "$CUSTODIAN" "$TO_LC" "$CHAIN_NAME" "$AMOUNT" "$TS_NOW" "$CUSTODIAN_ADDR_LC")"
-    NOTICE_SIG="$(cast wallet sign --private-key "$CUSTODIAN_PRIVATE_KEY" "$NOTICE_MESSAGE")"
-
-    NOTICE_JSON="$(jq -nc \
-      --arg version "1" \
-      --arg custodian "$CUSTODIAN" \
-      --arg to "$TO_LC" \
-      --arg chain "$CHAIN_NAME" \
-      --arg amountWei "$AMOUNT" \
-      --arg ts "$TS_NOW" \
-      --arg custodianAddress "$CUSTODIAN_ADDR_LC" \
-      --arg signature "$NOTICE_SIG" \
-      '{version:$version,custodian:$custodian,onchain:{to:$to,chain:$chain},amountWei:$amountWei,timestamp:($ts|tonumber),custodianAddress:$custodianAddress,signature:$signature}'
-    )"
-
-    if ! DEPOSITS_RESP="$(curl -sf -X POST -H 'content-type: application/json' --data "$NOTICE_JSON" "$RESERVE_API_BASE_URL/deposits")"; then
-      echo "reserve-api /deposits failed"
-      echo "url=$RESERVE_API_BASE_URL/deposits"
-      echo "ensure reserve-api is running and DEPOSIT_REQUIRE_SIGNATURE config matches"
-      exit 1
+  if [[ "${#GREENRESERVE_CMD[@]}" -gt 0 ]]; then
+    AMT_ETH="${AMT_ETH:-}"
+    if [[ -z "${AMT_ETH:-}" ]]; then
+      AMT_ETH="$(cast from-wei "$AMOUNT" ether)"
     fi
-    DEPOSIT_ID="$(echo "$DEPOSITS_RESP" | jq -r .depositId)"
-    DEPOSIT_CUSTODIAN_ADDR="$(echo "$DEPOSITS_RESP" | jq -r '.custodianAddress // empty')"
-    DEPOSIT_MESSAGE_HASH="$(echo "$DEPOSITS_RESP" | jq -r '.messageHash // empty')"
-    if [[ ! "$DEPOSIT_ID" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
-      echo "failed to get depositId from reserve-api"
-      echo "response=$DEPOSITS_RESP"
-      exit 1
-    fi
+    for _ in 1 2 3 4 5; do
+      if ! DEPOSITS_RESP="$("${GREENRESERVE_CMD[@]}" deposit create \
+        --json \
+        --non-interactive \
+        --config-file "$CONFIG_FILE" \
+        --reserve-api-base-url "$RESERVE_API_BASE_URL" \
+        --to "$TO" \
+        --amount-eth "$AMT_ETH" \
+        --chain "$CHAIN_NAME" \
+        --custodian "$CUSTODIAN" \
+        --custodian-private-key "$CUSTODIAN_PRIVATE_KEY" \
+      )"; then
+        echo "greenreserve deposit create failed"
+        exit 1
+      fi
 
-    USED_PRE="$(cast call "$ISSUER" "usedDepositId(bytes32)(bool)" "$DEPOSIT_ID" --rpc-url "$SEPOLIA_RPC")"
-    if [[ "$USED_PRE" != "true" ]]; then
-      break
-    fi
-  done
+      DEPOSIT_ID="$(echo "$DEPOSITS_RESP" | jq -r .depositId)"
+      DEPOSIT_CUSTODIAN_ADDR="$(echo "$DEPOSITS_RESP" | jq -r '.custodianAddress // empty')"
+      DEPOSIT_MESSAGE_HASH="$(echo "$DEPOSITS_RESP" | jq -r '.messageHash // empty')"
+
+      if [[ ! "$DEPOSIT_ID" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+        echo "failed to get depositId from reserve-api"
+        echo "response=$DEPOSITS_RESP"
+        exit 1
+      fi
+
+      USED_PRE="$(cast call "$ISSUER" "usedDepositId(bytes32)(bool)" "$DEPOSIT_ID" --rpc-url "$SEPOLIA_RPC")"
+      if [[ "$USED_PRE" != "true" ]]; then
+        break
+      fi
+      sleep 1
+    done
+  else
+    for _ in 1 2 3 4 5; do
+      TS_NOW="$(date +%s)"
+      TO_LC="$(lower "$TO")"
+      CUSTODIAN_ADDR_LC="$(lower "$CUSTODIAN_ADDR")"
+      NOTICE_MESSAGE="$(printf 'GreenReserveDepositNotice:v1\nversion=%s\ncustodian=%s\nto=%s\nchain=%s\namountWei=%s\ntimestamp=%s\ncustodianAddress=%s' \
+        "1" "$CUSTODIAN" "$TO_LC" "$CHAIN_NAME" "$AMOUNT" "$TS_NOW" "$CUSTODIAN_ADDR_LC")"
+      NOTICE_SIG="$(cast wallet sign --private-key "$CUSTODIAN_PRIVATE_KEY" "$NOTICE_MESSAGE")"
+
+      NOTICE_JSON="$(jq -nc \
+        --arg version "1" \
+        --arg custodian "$CUSTODIAN" \
+        --arg to "$TO_LC" \
+        --arg chain "$CHAIN_NAME" \
+        --arg amountWei "$AMOUNT" \
+        --arg ts "$TS_NOW" \
+        --arg custodianAddress "$CUSTODIAN_ADDR_LC" \
+        --arg signature "$NOTICE_SIG" \
+        '{version:$version,custodian:$custodian,onchain:{to:$to,chain:$chain},amountWei:$amountWei,timestamp:($ts|tonumber),custodianAddress:$custodianAddress,signature:$signature}'
+      )"
+
+      if ! DEPOSITS_RESP="$(curl -sf -X POST -H 'content-type: application/json' --data "$NOTICE_JSON" "$RESERVE_API_BASE_URL/deposits")"; then
+        echo "reserve-api /deposits failed"
+        echo "url=$RESERVE_API_BASE_URL/deposits"
+        echo "ensure reserve-api is running and DEPOSIT_REQUIRE_SIGNATURE config matches"
+        exit 1
+      fi
+      DEPOSIT_ID="$(echo "$DEPOSITS_RESP" | jq -r .depositId)"
+      DEPOSIT_CUSTODIAN_ADDR="$(echo "$DEPOSITS_RESP" | jq -r '.custodianAddress // empty')"
+      DEPOSIT_MESSAGE_HASH="$(echo "$DEPOSITS_RESP" | jq -r '.messageHash // empty')"
+      if [[ ! "$DEPOSIT_ID" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+        echo "failed to get depositId from reserve-api"
+        echo "response=$DEPOSITS_RESP"
+        exit 1
+      fi
+
+      USED_PRE="$(cast call "$ISSUER" "usedDepositId(bytes32)(bool)" "$DEPOSIT_ID" --rpc-url "$SEPOLIA_RPC")"
+      if [[ "$USED_PRE" != "true" ]]; then
+        break
+      fi
+    done
+  fi
 fi
 
 TMP_PAYLOAD="$(mktemp)"
@@ -433,10 +488,21 @@ MESSAGE_ID="${MESSAGE_ID:-}"
 
 if [[ -z "$SKIP_BROADCAST" ]]; then
   BROADCAST_LOG="$(mktemp)"
-  PAYLOAD_FILE="$TMP_PAYLOAD" \
-    TARGET="$TARGET" \
-    TRIGGER_INDEX="$TRIGGER_INDEX" \
-    "$REPO_ROOT/scripts/broadcast-engine-logs.sh" 2>&1 | tee "$BROADCAST_LOG"
+  if [[ "${#GREENRESERVE_CMD[@]}" -gt 0 ]]; then
+    CRE_PATH="$(command -v cre)"
+    "${GREENRESERVE_CMD[@]}" deposit submit \
+      --deposit-id "$DEPOSIT_ID" \
+      --scenario "$SCENARIO" \
+      --target "$TARGET" \
+      --trigger-index "$TRIGGER_INDEX" \
+      --payload-file "$TMP_PAYLOAD" \
+      --cre-path "$CRE_PATH" 2>&1 | tee "$BROADCAST_LOG"
+  else
+    PAYLOAD_FILE="$TMP_PAYLOAD" \
+      TARGET="$TARGET" \
+      TRIGGER_INDEX="$TRIGGER_INDEX" \
+      "$REPO_ROOT/scripts/broadcast-engine-logs.sh" 2>&1 | tee "$BROADCAST_LOG"
+  fi
 
   CCIP_TX_HASH="$(grep -oE 'ccip_tx_status=[0-9]+ txHash=0x[0-9a-fA-F]+' "$BROADCAST_LOG" | tail -n 1 | awk -F'txHash=' '{print $2}' | awk '{print $1}')"
   MINT_TX_HASH="$(grep -oE 'mint_tx_status=[0-9]+ txHash=0x[0-9a-fA-F]+' "$BROADCAST_LOG" | tail -n 1 | awk -F'txHash=' '{print $2}' | awk '{print $1}')"
