@@ -94,13 +94,27 @@ export const runDepositCreate = async (opts: {
   const initialChain = opts.chain ?? "base-sepolia"
   const initialCustodian = opts.custodian ?? "cli"
 
+  const requestedVersion = String(opts.noticeVersion ?? "").trim()
+  if (requestedVersion && requestedVersion !== "1" && requestedVersion !== "2") {
+    throw new Error("invalid_notice_version")
+  }
+
+  const hasExtendedOpts = Boolean(
+    (opts.assetType ?? "").trim() ||
+      (opts.assetRegistry ?? "").trim() ||
+      (opts.assetProjectId ?? "").trim() ||
+      (opts.fiatCurrency ?? "").trim() ||
+      (opts.fiatAmount ?? "").trim() ||
+      (opts.evidenceUrl ?? "").trim(),
+  )
+
   const allowPrompt = Boolean(process.stdin.isTTY && process.stdout.isTTY && !opts.nonInteractive)
   const answers = await (async () => {
     if (!allowPrompt) {
       return { to: initialTo, amountEth: initialAmountEth, chain: initialChain, custodian: initialCustodian }
     }
     try {
-      return await prompts(
+      const base = await prompts(
         [
           {
             type: opts.to ? null : "text",
@@ -128,9 +142,62 @@ export const runDepositCreate = async (opts: {
             message: "custodian name",
             initial: initialCustodian,
           },
+          {
+            type: requestedVersion || hasExtendedOpts ? null : "confirm",
+            name: "useV2",
+            message: "add v2 deposit notice fields (asset/fiat/evidenceUrl)",
+            initial: false,
+          },
         ],
-        { onCancel: () => process.exit(1) }
+        { onCancel: () => process.exit(1) },
       )
+
+      const wantsV2 = requestedVersion === "2" || hasExtendedOpts || Boolean((base as any)?.useV2)
+      if (!wantsV2) return base
+
+      const ext = await prompts(
+        [
+          {
+            type: opts.assetType ? null : "text",
+            name: "assetType",
+            message: "asset.type",
+            initial: "",
+          },
+          {
+            type: opts.assetRegistry ? null : "text",
+            name: "assetRegistry",
+            message: "asset.registry",
+            initial: "",
+          },
+          {
+            type: opts.assetProjectId ? null : "text",
+            name: "assetProjectId",
+            message: "asset.projectId",
+            initial: "",
+          },
+          {
+            type: opts.fiatCurrency ? null : "text",
+            name: "fiatCurrency",
+            message: "fiat.currency",
+            initial: "",
+          },
+          {
+            type: opts.fiatAmount ? null : "text",
+            name: "fiatAmount",
+            message: "fiat.amount",
+            initial: "",
+          },
+          {
+            type: opts.evidenceUrl ? null : "text",
+            name: "evidenceUrl",
+            message: "evidenceUrl",
+            initial: "",
+          },
+        ],
+        { onCancel: () => process.exit(1) },
+      )
+
+      return { ...base, ...ext }
     } catch {
       return { to: initialTo, amountEth: initialAmountEth, chain: initialChain, custodian: initialCustodian }
     }
@@ -148,21 +215,23 @@ export const runDepositCreate = async (opts: {
   const custodian = String(answers.custodian ?? initialCustodian).trim()
   if (!custodian) throw new Error("invalid_custodian")
 
-  const requestedVersion = String(opts.noticeVersion ?? "").trim()
-  if (requestedVersion && requestedVersion !== "1" && requestedVersion !== "2") {
-    throw new Error("invalid_notice_version")
-  }
+  const resolvedAssetType = (opts.assetType ?? "").trim() || String((answers as any)?.assetType ?? "").trim()
+  const resolvedAssetRegistry =
+    (opts.assetRegistry ?? "").trim() || String((answers as any)?.assetRegistry ?? "").trim()
+  const resolvedAssetProjectId =
+    (opts.assetProjectId ?? "").trim() || String((answers as any)?.assetProjectId ?? "").trim()
+  const resolvedFiatCurrency =
+    (opts.fiatCurrency ?? "").trim() || String((answers as any)?.fiatCurrency ?? "").trim()
+  const resolvedFiatAmount = (opts.fiatAmount ?? "").trim() || String((answers as any)?.fiatAmount ?? "").trim()
+  const resolvedEvidenceUrl =
+    (opts.evidenceUrl ?? "").trim() || String((answers as any)?.evidenceUrl ?? "").trim()
 
   const hasExtendedFields = Boolean(
-    (opts.assetType ?? "").trim() ||
-      (opts.assetRegistry ?? "").trim() ||
-      (opts.assetProjectId ?? "").trim() ||
-      (opts.fiatCurrency ?? "").trim() ||
-      (opts.fiatAmount ?? "").trim() ||
-      (opts.evidenceUrl ?? "").trim(),
+    resolvedAssetType || resolvedAssetRegistry || resolvedAssetProjectId || resolvedFiatCurrency || resolvedFiatAmount || resolvedEvidenceUrl,
   )
 
-  const noticeVersion = requestedVersion || (hasExtendedFields ? "2" : "1")
+  const wantsV2 = requestedVersion === "2" || hasExtendedOpts || Boolean((answers as any)?.useV2) || hasExtendedFields
+  const noticeVersion = requestedVersion || (wantsV2 ? "2" : "1")
   if (noticeVersion !== "1" && noticeVersion !== "2") throw new Error("invalid_notice_version")
   if (noticeVersion === "1" && hasExtendedFields) throw new Error("notice_version_required_for_extended_fields")
 
@@ -175,15 +244,15 @@ export const runDepositCreate = async (opts: {
     ...(noticeVersion === "2"
       ? {
           asset: {
-            type: (opts.assetType ?? "").trim() || undefined,
-            registry: (opts.assetRegistry ?? "").trim() || undefined,
-            projectId: (opts.assetProjectId ?? "").trim() || undefined,
+            type: resolvedAssetType || undefined,
+            registry: resolvedAssetRegistry || undefined,
+            projectId: resolvedAssetProjectId || undefined,
           },
           fiat: {
-            currency: (opts.fiatCurrency ?? "").trim() || undefined,
-            amount: (opts.fiatAmount ?? "").trim() || undefined,
+            currency: resolvedFiatCurrency || undefined,
+            amount: resolvedFiatAmount || undefined,
           },
-          evidenceUrl: (opts.evidenceUrl ?? "").trim() || undefined,
+          evidenceUrl: resolvedEvidenceUrl || undefined,
         }
       : {}),
   }

@@ -51,6 +51,7 @@ const main = async () => {
     .option("--amount-eth <eth>")
     .option("--chain <name>")
     .option("--custodian <name>")
+    .option("--asset <type>")
     .option("--asset-type <type>")
     .option("--asset-registry <registry>")
     .option("--asset-project-id <id>")
@@ -71,7 +72,7 @@ const main = async () => {
           amountEth: opts.amountEth,
           chain: opts.chain,
           custodian: opts.custodian,
-          assetType: opts.assetType,
+          assetType: opts.assetType ?? opts.asset,
           assetRegistry: opts.assetRegistry,
           assetProjectId: opts.assetProjectId,
           fiatCurrency: opts.fiatCurrency,
