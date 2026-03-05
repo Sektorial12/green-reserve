@@ -1,4 +1,10 @@
-import { ensureSanctionsLoaded, getSanctionsLoadState, getSanctionsMeta, screenAddressAgainstSanctions } from "./sanctions"
+import {
+  ensureSanctionsLoaded,
+  getSanctionsLoadState,
+  getSanctionsMeta,
+  screenAddressAgainstSanctions,
+  startSanctionsRefreshLoop,
+} from "./sanctions"
 import { generateRiskMemo } from "./ai"
 import { loadReservesState } from "./reserves"
 import { hashMessage, recoverAddress } from "viem"
@@ -30,6 +36,7 @@ const isHexAddress = (a: string): boolean => /^0x[0-9a-fA-F]{40}$/.test(a)
 const normalizeAddress = (a: string): string => a.toLowerCase()
 
 ensureSanctionsLoaded().catch(() => {})
+startSanctionsRefreshLoop()
 
 const sha256Hex = async (text: string): Promise<string> => {
   const bytes = new TextEncoder().encode(text)

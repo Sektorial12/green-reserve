@@ -60,6 +60,8 @@ const lists: Record<ListId, SanctionsListState> = {
   },
 }
 
+let refreshInterval: ReturnType<typeof setInterval> | null = null
+
 const sha256Hex = async (text: string): Promise<string> => {
   const bytes = new TextEncoder().encode(text)
   const hashBuf = await crypto.subtle.digest("SHA-256", bytes)
@@ -206,6 +208,27 @@ export const ensureSanctionsLoaded = async (): Promise<void> => {
   await Promise.all(enabled.map((id) => ensureListLoaded(id)))
 }
 
+export const startSanctionsRefreshLoop = (): void => {
+  if (refreshInterval) return
+
+  const intervalSecRaw = (Bun.env.SANCTIONS_REFRESH_INTERVAL_SEC ?? "300").trim()
+  const intervalSec = Number.parseInt(intervalSecRaw, 10)
+  if (!Number.isFinite(intervalSec) || intervalSec <= 0) return
+
+  const tick = async () => {
+    try {
+      await ensureSanctionsLoaded()
+    } catch {
+      return
+    }
+  }
+
+  tick().catch(() => {})
+  refreshInterval = setInterval(() => {
+    tick().catch(() => {})
+  }, intervalSec * 1000)
+}
+
 export const getSanctionsLoadState = () => {
   return {
     lists: {
@@ -255,6 +278,7 @@ export const getSanctionsMeta = () => {
       sha256: st.cache.sha256,
       etag: st.cache.etag,
       lastModified: st.cache.lastModified,
+      loadedAtMs: st.lastLoadedAtMs,
       blockedAddressCount: st.cache.addresses.size,
     }
   }
@@ -268,7 +292,7 @@ export const getSanctionsMeta = () => {
 
 export const screenAddressAgainstSanctions = (
   address: string,
-): { isAllowed: boolean; reason: string; ruleId: string; evidence?: any } => {
+): { isAllowed: boolean; reason: string; ruleId: string; checkedAt?: string; listVersion?: string; evidence?: any } => {
   const normalized = address.toLowerCase()
 
   const meta = getSanctionsMeta()
@@ -281,6 +305,15 @@ export const screenAddressAgainstSanctions = (
   }
 
   const listIds: ListId[] = ["ofac_sdn_advanced", "eu_consolidated", "uk_sanctions_list"]
+  const enabledListIds = listIds.filter((id) => isEnabled(id))
+  const listVersion = enabledListIds
+    .map((id) => `${id}:${String((meta as any)?.lists?.[id]?.sha256 ?? "")}`)
+    .join("|")
+  const checkedAtMs = enabledListIds
+    .map((id) => lists[id].lastLoadedAtMs)
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0)
+    .reduce((acc, v) => (acc === null ? v : Math.min(acc, v)), null as null | number)
+  const checkedAt = checkedAtMs ? new Date(checkedAtMs).toISOString() : undefined
   for (const id of listIds) {
     const st = lists[id]
     if (!st.cache) continue
@@ -289,6 +322,8 @@ export const screenAddressAgainstSanctions = (
         isAllowed: false,
         reason: `sanctions_${id}_match`,
         ruleId: `SANCTIONS:${id}:ADDRESS_MATCH`,
+        checkedAt,
+        listVersion,
         evidence: {
           sourceUrl: st.cache.sourceUrl,
           sha256: st.cache.sha256,
@@ -311,6 +346,8 @@ export const screenAddressAgainstSanctions = (
     isAllowed: true,
     reason: "sanctions_clear",
     ruleId: "SANCTIONS:CLEAR",
+    checkedAt,
+    listVersion,
     evidence: {
       ...(primaryList && lists[primaryList].cache
         ? {

@@ -114,6 +114,8 @@ const kycApiResponseSchema = z
     isAllowed: z.boolean(),
     reason: z.string().optional(),
     ruleId: z.string().optional(),
+    checkedAt: z.string().optional(),
+    listVersion: z.string().optional(),
     evidence: z.unknown().optional(),
   })
   .passthrough()
@@ -879,6 +881,8 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
     `isAllowed=${String(Boolean(kyc.isAllowed))}`,
     `reason=${String(kyc.reason ?? "")}`,
     `ruleId=${String(kyc.ruleId ?? "")}`,
+    `checkedAt=${String((kyc as any)?.checkedAt ?? "")}`,
+    `listVersion=${String((kyc as any)?.listVersion ?? "")}`,
     `evidenceListId=${String((kyc as any)?.evidence?.matchedList ?? (kyc as any)?.evidence?.primaryList ?? "")}`,
     `evidenceOfacSha256=${String((kyc as any)?.evidence?.lists?.ofac_sdn_advanced?.sha256 ?? "")}`,
     `evidenceEuSha256=${String((kyc as any)?.evidence?.lists?.eu_consolidated?.sha256 ?? "")}`,
