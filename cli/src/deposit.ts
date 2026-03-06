@@ -1,13 +1,16 @@
 import prompts from "prompts"
 import path from "node:path"
 import { tmpdir } from "node:os"
-import { createPublicClient, decodeEventLog, hashMessage, http, parseAbi, parseEther } from "viem"
+import { createPublicClient, decodeAbiParameters, decodeEventLog, hashMessage, http, parseAbi, parseEther } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
 import { asUrlBase, httpGetJson, httpPostJson, isHexAddress, isHexBytes32, lower, repoRoot } from "./util"
 import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config"
 
 const ISSUER_ABI = parseAbi(["function usedDepositId(bytes32 depositId) view returns (bool)"])
-const RECEIVER_ABI = parseAbi(["function processedDepositId(bytes32 depositId) view returns (bool)"])
+const RECEIVER_ABI = parseAbi([
+  "function processedDepositId(bytes32 depositId) view returns (bool)",
+  "function getFailedMessage(bytes32 messageId) view returns (uint8 state, bytes reason, uint64 sourceChainSelector, bytes sender, bytes data)",
+])
 const ERC20_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"])
 const SENDER_EVENT_ABI = parseAbi([
   "event MessageSent(bytes32 indexed messageId, bytes32 indexed depositId, address indexed to, uint256 amount)",
@@ -507,6 +510,18 @@ export const runDepositStatus = async (opts: {
           externalRssSha256: string
           externalJsonSha256: string
         } = null
+    let receiverFailure:
+      | null
+      | {
+          state: string
+          reason: string | null
+          sourceChainSelector: string | null
+          sender: string | null
+          decodedTo: string | null
+          decodedAmountWei: string | null
+          decodedDepositId: string | null
+          rawData: string | null
+        } = null
 
     const auditRegistry = cfg.sepoliaAuditRegistryAddress ?? ""
     if (auditRegistry && isHexAddress(auditRegistry)) {
@@ -581,6 +596,59 @@ export const runDepositStatus = async (opts: {
       args: [depositId as any],
     })) as boolean
 
+    if (decodedMessageId && isHexBytes32(decodedMessageId)) {
+      try {
+        const result = (await baseClient.readContract({
+          address: receiver as any,
+          abi: RECEIVER_ABI,
+          functionName: "getFailedMessage",
+          args: [decodedMessageId as any],
+        })) as any
+
+        const state = String(result?.[0] ?? "0")
+        const reason = String(result?.[1] ?? "")
+        const sourceChainSelector = String(result?.[2] ?? "")
+        const senderBytes = String(result?.[3] ?? "")
+        const dataBytes = String(result?.[4] ?? "")
+
+        let decodedTo: string | null = null
+        let decodedAmountWei: string | null = null
+        let decodedDepositId: string | null = null
+        let decodedSender: string | null = null
+
+        try {
+          const [sender] = decodeAbiParameters([{ type: "address" }], senderBytes as `0x${string}`)
+          decodedSender = String(sender)
+        } catch {}
+
+        try {
+          const [nextTo, nextAmountWei, nextDepositId] = decodeAbiParameters(
+            [{ type: "address" }, { type: "uint256" }, { type: "bytes32" }],
+            dataBytes as `0x${string}`,
+          )
+          decodedTo = String(nextTo)
+          decodedAmountWei = nextAmountWei.toString()
+          decodedDepositId = String(nextDepositId)
+        } catch {}
+
+        receiverFailure =
+          state === "0" && !reason && !sourceChainSelector && !senderBytes && !dataBytes
+            ? null
+            : {
+                state,
+                reason: reason || null,
+                sourceChainSelector: sourceChainSelector || null,
+                sender: decodedSender,
+                decodedTo,
+                decodedAmountWei,
+                decodedDepositId,
+                rawData: dataBytes || null,
+              }
+      } catch {
+        receiverFailure = null
+      }
+    }
+
     let tokenBBalance: string | null = null
     if (processed && tokenB && isHexAddress(tokenB) && to && isHexAddress(to)) {
       const bal = (await baseClient.readContract({
@@ -592,7 +660,7 @@ export const runDepositStatus = async (opts: {
       tokenBBalance = bal.toString()
     }
 
-    return { to, amountWei, used, processed, tokenBBalance, audit, aiAudit, depositNoticeSource, reserveApiError }
+    return { to, amountWei, used, processed, tokenBBalance, audit, aiAudit, receiverFailure, depositNoticeSource, reserveApiError }
   }
 
   if (!opts.json) {
@@ -655,6 +723,33 @@ export const runDepositStatus = async (opts: {
     }
   }
 
+  const normalizeReceiverFailure = (
+    receiverFailure:
+      | null
+      | {
+          state: string
+          reason: string | null
+          sourceChainSelector: string | null
+          sender: string | null
+          decodedTo: string | null
+          decodedAmountWei: string | null
+          decodedDepositId: string | null
+          rawData: string | null
+        },
+  ) => {
+    if (!receiverFailure) return null
+    return {
+      state: receiverFailure.state || null,
+      reason: receiverFailure.reason || null,
+      sourceChainSelector: receiverFailure.sourceChainSelector || null,
+      sender: receiverFailure.sender || null,
+      decodedTo: receiverFailure.decodedTo || null,
+      decodedAmountWei: receiverFailure.decodedAmountWei || null,
+      decodedDepositId: receiverFailure.decodedDepositId || null,
+      rawData: receiverFailure.rawData || null,
+    }
+  }
+
   const intervalSec = Number.isFinite(opts.intervalSec) ? (opts.intervalSec as number) : 5
   const watch = Boolean(opts.watch)
 
@@ -677,7 +772,7 @@ export const runDepositStatus = async (opts: {
       }
     }
 
-    const { to, amountWei, used, processed, tokenBBalance, audit, aiAudit, depositNoticeSource, reserveApiError } = await pollOnce()
+    const { to, amountWei, used, processed, tokenBBalance, audit, aiAudit, receiverFailure, depositNoticeSource, reserveApiError } = await pollOnce()
 
     if (opts.json) {
       seq += 1
@@ -700,6 +795,7 @@ export const runDepositStatus = async (opts: {
           baseSepoliaAddressUrl: processed && to && isHexAddress(to) ? `${baseSepoliaExplorerBase}/address/${to}` : null,
           audit: normalizeAudit(audit),
           aiAudit: normalizeAiAudit(aiAudit),
+          receiverFailure: normalizeReceiverFailure(receiverFailure),
         }) + "\n",
       )
     } else {
@@ -723,6 +819,18 @@ export const runDepositStatus = async (opts: {
       process.stdout.write(`usedDepositId=${used ? "true" : "false"}\n`)
       process.stdout.write(`processedDepositId=${processed ? "true" : "false"}\n`)
       if (tokenBBalance !== null) process.stdout.write(`tokenBBalance=${tokenBBalance}\n`)
+      if (receiverFailure) {
+        process.stdout.write(`receiverFailedMessageState=${receiverFailure.state}\n`)
+        if (receiverFailure.reason) process.stdout.write(`receiverFailedMessageReason=${receiverFailure.reason}\n`)
+        if (receiverFailure.sourceChainSelector)
+          process.stdout.write(`receiverFailedMessageSourceChainSelector=${receiverFailure.sourceChainSelector}\n`)
+        if (receiverFailure.sender) process.stdout.write(`receiverFailedMessageSender=${receiverFailure.sender}\n`)
+        if (receiverFailure.decodedTo) process.stdout.write(`receiverFailedMessageTo=${receiverFailure.decodedTo}\n`)
+        if (receiverFailure.decodedAmountWei)
+          process.stdout.write(`receiverFailedMessageAmountWei=${receiverFailure.decodedAmountWei}\n`)
+        if (receiverFailure.decodedDepositId)
+          process.stdout.write(`receiverFailedMessageDepositId=${receiverFailure.decodedDepositId}\n`)
+      }
 
       if (processed && to && isHexAddress(to)) {
         process.stdout.write(`baseSepoliaAddressExplorer=${baseSepoliaExplorerBase}/address/${to}\n`)
