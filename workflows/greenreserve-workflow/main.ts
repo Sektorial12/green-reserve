@@ -131,6 +131,7 @@ const aiRiskMemoResponseSchema = z
       decision: z.enum(["approve", "manual_review", "reject"]),
       reasons: z.array(z.string()),
     }),
+    createdAtMs: z.number().int().nonnegative().optional(),
     memoSha256: z.string().regex(/^[0-9a-fA-F]{64}$/),
     inputSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
     model: z.string().optional(),
@@ -139,6 +140,8 @@ const aiRiskMemoResponseSchema = z
       .object({
         rssUrl: z.string().optional(),
         rssSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+        jsonUrl: z.string().optional(),
+        jsonSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
       })
       .passthrough()
       .nullable()
@@ -218,7 +221,7 @@ const RECEIVER_ABI = parseAbi([
 ])
 
 const AUDIT_REGISTRY_ABI = parseAbi([
-  "function record(bytes32 depositId, bytes32 depositNoticeHash, bytes32 reserveAttestationHash, bytes32 complianceDecisionHash, bytes32 aiOutputHash)",
+  "function record(bytes32 depositId, bytes32 depositNoticeHash, bytes32 reserveAttestationHash, bytes32 complianceDecisionHash, bytes32 aiOutputHash, bytes32[6] aiHashes, uint64[3] aiMetrics)",
 ])
 
 const ZERO_BYTES32 = ("0x" + "0".repeat(64)) as `0x${string}`
@@ -240,7 +243,16 @@ const writeAuditRecord = (
   depositNoticeHash: `0x${string}`,
   reserveAttestationHash: `0x${string}`,
   complianceDecisionHash: `0x${string}`,
-  aiOutputHash: `0x${string}`
+  aiOutputHash: `0x${string}`,
+  aiMemoSha256: `0x${string}`,
+  aiInputSha256: `0x${string}`,
+  aiModelHash: `0x${string}`,
+  aiPromptVersionHash: `0x${string}`,
+  aiConfidenceBps: number,
+  aiCreatedAt: bigint,
+  aiDecision: number,
+  aiExternalRssSha256: `0x${string}`,
+  aiExternalJsonSha256: `0x${string}`
 ) => {
   const network = getNetwork({
     chainFamily: "evm",
@@ -255,7 +267,22 @@ const writeAuditRecord = (
   const writeData = encodeFunctionData({
     abi: AUDIT_REGISTRY_ABI,
     functionName: "record",
-    args: [depositId, depositNoticeHash, reserveAttestationHash, complianceDecisionHash, aiOutputHash],
+    args: [
+      depositId,
+      depositNoticeHash,
+      reserveAttestationHash,
+      complianceDecisionHash,
+      aiOutputHash,
+      [
+        aiMemoSha256,
+        aiInputSha256,
+        aiModelHash,
+        aiPromptVersionHash,
+        aiExternalRssSha256,
+        aiExternalJsonSha256,
+      ],
+      [BigInt(aiConfidenceBps), aiCreatedAt, BigInt(aiDecision)],
+    ],
   })
 
   const report = runtime.report(prepareReportRequest(writeData)).result()
@@ -896,12 +923,15 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
 
   let ai: null | {
     memo: { riskScore: number; confidence: number; decision: string; reasons: string[] }
+    createdAtMs: number
     memoSha256: string
     inputSha256: string
     model: string
     promptVersion: string
     externalRssSha256: string
     externalRssUrl: string
+    externalJsonSha256: string
+    externalJsonUrl: string
   } = null
   try {
     const aiUrl = `${baseUrl}/ai/risk-memo?depositId=${encodeURIComponent(deposit.depositId)}&to=${encodeURIComponent(
@@ -917,12 +947,15 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
     const external = parsed.external && typeof parsed.external === "object" ? parsed.external : null
     ai = {
       memo: parsed.memo,
+      createdAtMs: parsed.createdAtMs ?? 0,
       memoSha256: parsed.memoSha256,
       inputSha256: parsed.inputSha256 ?? "",
       model: parsed.model ?? "",
       promptVersion: parsed.promptVersion ?? "",
       externalRssSha256: (external as any)?.rssSha256 ?? "",
       externalRssUrl: (external as any)?.rssUrl ?? "",
+      externalJsonSha256: (external as any)?.jsonSha256 ?? "",
+      externalJsonUrl: (external as any)?.jsonUrl ?? "",
     }
   } catch (e) {
     runtime.log(`blocked: reason=ai_unavailable error=${(e as Error).message}`)
@@ -932,17 +965,44 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
   const aiOutputHashBytes32 = (() => {
     if (!ai?.memoSha256 || !/^[0-9a-fA-F]{64}$/.test(ai.memoSha256)) return ZERO_BYTES32
     const msg = [
-      "GreenReserveAiOutputCommit:v1",
+      "GreenReserveAiOutputCommit:v2",
       `depositId=${deposit.depositId.toLowerCase()}`,
       `memoSha256=${ai.memoSha256.toLowerCase()}`,
       `model=${String(ai.model ?? "")}`,
       `promptVersion=${String(ai.promptVersion ?? "")}`,
+      `createdAtMs=${String(ai.createdAtMs ?? 0)}`,
       `inputSha256=${String(ai.inputSha256 ?? "")}`,
       `externalRssSha256=${String(ai.externalRssSha256 ?? "")}`,
       `externalRssUrl=${String(ai.externalRssUrl ?? "")}`,
+      `externalJsonSha256=${String(ai.externalJsonSha256 ?? "")}`,
+      `externalJsonUrl=${String(ai.externalJsonUrl ?? "")}`,
     ].join("\n")
     return sha256(toBytes(msg)) as `0x${string}`
   })()
+
+  const aiMemoSha256Bytes32 = (() => {
+    if (!ai?.memoSha256 || !/^[0-9a-fA-F]{64}$/.test(ai.memoSha256)) return ZERO_BYTES32
+    return (`0x${ai.memoSha256.toLowerCase()}`) as `0x${string}`
+  })()
+
+  const aiInputSha256Bytes32 = (() => {
+    if (!ai?.inputSha256 || !/^[0-9a-fA-F]{64}$/.test(ai.inputSha256)) return ZERO_BYTES32
+    return (`0x${ai.inputSha256.toLowerCase()}`) as `0x${string}`
+  })()
+
+  const aiModelHashBytes32 = ai?.model ? (sha256(toBytes(ai.model)) as `0x${string}`) : ZERO_BYTES32
+  const aiPromptVersionHashBytes32 = ai?.promptVersion ? (sha256(toBytes(ai.promptVersion)) as `0x${string}`) : ZERO_BYTES32
+  const aiExternalRssSha256Bytes32 = (() => {
+    if (!ai?.externalRssSha256 || !/^[0-9a-fA-F]{64}$/.test(ai.externalRssSha256)) return ZERO_BYTES32
+    return (`0x${ai.externalRssSha256.toLowerCase()}`) as `0x${string}`
+  })()
+  const aiExternalJsonSha256Bytes32 = (() => {
+    if (!ai?.externalJsonSha256 || !/^[0-9a-fA-F]{64}$/.test(ai.externalJsonSha256)) return ZERO_BYTES32
+    return (`0x${ai.externalJsonSha256.toLowerCase()}`) as `0x${string}`
+  })()
+  const aiConfidenceBps = ai ? Math.max(0, Math.min(10_000, Math.round(ai.memo.confidence * 10_000))) : 0
+  const aiCreatedAt = BigInt(ai && Number.isFinite(ai.createdAtMs) && ai.createdAtMs > 0 ? Math.floor(ai.createdAtMs / 1000) : 0)
+  const aiDecision = ai?.memo.decision === "approve" ? 1 : ai?.memo.decision === "manual_review" ? 2 : ai?.memo.decision === "reject" ? 3 : 0
 
   let reserveRatioBps: bigint
   try {
@@ -971,7 +1031,7 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
     )
     if (ai.promptVersion || ai.externalRssSha256 || ai.externalRssUrl) {
       runtime.log(
-        `ai_evidence promptVersion=${ai.promptVersion} externalRssSha256=${ai.externalRssSha256} externalRssUrl=${ai.externalRssUrl}`
+        `ai_evidence promptVersion=${ai.promptVersion} createdAtMs=${ai.createdAtMs} externalRssSha256=${ai.externalRssSha256} externalRssUrl=${ai.externalRssUrl} externalJsonSha256=${ai.externalJsonSha256} externalJsonUrl=${ai.externalJsonUrl}`
       )
     }
     if (ai.memo.decision === "reject") {
@@ -1003,7 +1063,16 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
       depositNoticeHashBytes32,
       reserveAttestationHashBytes32,
       complianceDecisionHashBytes32,
-      aiOutputHashBytes32
+      aiOutputHashBytes32,
+      aiMemoSha256Bytes32,
+      aiInputSha256Bytes32,
+      aiModelHashBytes32,
+      aiPromptVersionHashBytes32,
+      aiConfidenceBps,
+      aiCreatedAt,
+      aiDecision,
+      aiExternalRssSha256Bytes32,
+      aiExternalJsonSha256Bytes32
     )
 
     runtime.log(

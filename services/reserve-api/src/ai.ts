@@ -35,9 +35,12 @@ export type ExternalRssItem = {
 }
 
 export type ExternalSignals = {
-  rssUrl: string
-  rssSha256: string
-  rssItems: ExternalRssItem[]
+  rssUrl?: string
+  rssSha256?: string
+  rssItems?: ExternalRssItem[]
+  jsonUrl?: string
+  jsonSha256?: string
+  jsonExcerpt?: string
 }
 
 export type GenerateRiskMemoResult = {
@@ -62,6 +65,8 @@ type ExternalCacheEntry = {
 
 const externalCache = new Map<string, ExternalCacheEntry>()
 const externalInFlight = new Map<string, Promise<ExternalSignals | null>>()
+
+const buildExternalCacheKey = (rssUrl: string, jsonUrl: string): string => `${rssUrl}::${jsonUrl}`
 
 const fetchWithTimeout = async (url: string, timeoutMs: number): Promise<Response> => {
   const ctrl = new AbortController()
@@ -107,47 +112,103 @@ const parseRssItems = (xml: string, maxItems: number): ExternalRssItem[] => {
   return out
 }
 
+const canonicalizeJson = (text: string): string => JSON.stringify(JSON.parse(text))
+
+const makeJsonExcerpt = (jsonText: string, maxChars: number): string => {
+  if (maxChars <= 0) return ""
+  return jsonText.length <= maxChars ? jsonText : jsonText.slice(0, maxChars)
+}
+
+const loadRssSignals = async (
+  rssUrl: string,
+  timeoutMs: number,
+  maxItems: number,
+): Promise<ExternalSignals | null> => {
+  try {
+    const resp = await fetchWithTimeout(rssUrl, timeoutMs)
+    if (!resp.ok) {
+      return null
+    }
+
+    const text = await resp.text()
+    const rssSha256 = await sha256Hex(text)
+    const rssItems = parseRssItems(text, maxItems)
+    return { rssUrl, rssSha256, rssItems }
+  } catch {
+    return null
+  }
+}
+
+const loadJsonSignals = async (
+  jsonUrl: string,
+  timeoutMs: number,
+  maxChars: number,
+): Promise<ExternalSignals | null> => {
+  try {
+    const resp = await fetchWithTimeout(jsonUrl, timeoutMs)
+    if (!resp.ok) {
+      return null
+    }
+
+    const text = await resp.text()
+    const canonicalJson = canonicalizeJson(text)
+    const jsonSha256 = await sha256Hex(canonicalJson)
+    const jsonExcerpt = makeJsonExcerpt(canonicalJson, maxChars)
+    return { jsonUrl, jsonSha256, jsonExcerpt }
+  } catch {
+    return null
+  }
+}
+
 const loadExternalSignals = async (): Promise<ExternalSignals | null> => {
   const rssUrl = (Bun.env.AI_RISK_MEMO_RSS_URL ?? "").trim()
-  if (!rssUrl) return null
+  const jsonUrl = (Bun.env.AI_RISK_MEMO_JSON_URL ?? "").trim()
+  if (!rssUrl && !jsonUrl) return null
+
+  const cacheKey = buildExternalCacheKey(rssUrl, jsonUrl)
 
   const ttlSec = Number.parseInt(Bun.env.AI_EXTERNAL_CACHE_TTL_SEC ?? "3600", 10)
   const ttlMs = Number.isFinite(ttlSec) ? ttlSec * 1000 : 3600 * 1000
-  const cached = externalCache.get(rssUrl)
+  const cached = externalCache.get(cacheKey)
   if (cached && Date.now() - cached.createdAtMs < ttlMs) return cached.value
 
-  const existing = externalInFlight.get(rssUrl)
+  const existing = externalInFlight.get(cacheKey)
   if (existing) return await existing
 
   const timeoutMs = Number.parseInt(Bun.env.AI_EXTERNAL_FETCH_TIMEOUT_MS ?? "10000", 10)
   const maxItems = Number.parseInt(Bun.env.AI_RISK_MEMO_RSS_MAX_ITEMS ?? "5", 10)
+  const maxJsonChars = Number.parseInt(Bun.env.AI_RISK_MEMO_JSON_MAX_CHARS ?? "1500", 10)
 
   const promise = (async () => {
-    let value: ExternalSignals | null = null
-    try {
-      const resp = await fetchWithTimeout(rssUrl, Number.isFinite(timeoutMs) ? timeoutMs : 10000)
-      if (!resp.ok) {
-        externalCache.set(rssUrl, { createdAtMs: Date.now(), value: null })
-        return null
-      }
+    const [rssValue, jsonValue] = await Promise.all([
+      rssUrl
+        ? loadRssSignals(rssUrl, Number.isFinite(timeoutMs) ? timeoutMs : 10000, Number.isFinite(maxItems) ? maxItems : 5)
+        : Promise.resolve(null),
+      jsonUrl
+        ? loadJsonSignals(
+            jsonUrl,
+            Number.isFinite(timeoutMs) ? timeoutMs : 10000,
+            Number.isFinite(maxJsonChars) ? maxJsonChars : 1500,
+          )
+        : Promise.resolve(null),
+    ])
 
-      const text = await resp.text()
-      const rssSha256 = await sha256Hex(text)
-      const rssItems = parseRssItems(text, Number.isFinite(maxItems) ? maxItems : 5)
-      value = { rssUrl, rssSha256, rssItems }
-    } catch {
-      value = null
+    const value = {
+      ...(rssValue ?? {}),
+      ...(jsonValue ?? {}),
     }
 
-    externalCache.set(rssUrl, { createdAtMs: Date.now(), value })
-    return value
+    const normalized = Object.keys(value).length > 0 ? value : null
+
+    externalCache.set(cacheKey, { createdAtMs: Date.now(), value: normalized })
+    return normalized
   })()
 
-  externalInFlight.set(rssUrl, promise)
+  externalInFlight.set(cacheKey, promise)
   try {
     return await promise
   } finally {
-    externalInFlight.delete(rssUrl)
+    externalInFlight.delete(cacheKey)
   }
 }
 

@@ -15,6 +15,11 @@ const SENDER_EVENT_ABI = parseAbi([
 const AUDIT_REGISTRY_ABI = parseAbi([
   "function auditByDepositId(bytes32 depositId) view returns (bytes32 depositNoticeHash, bytes32 reserveAttestationHash, bytes32 complianceDecisionHash, bytes32 aiOutputHash, uint64 updatedAt, address updater)",
 ])
+const AI_AUDIT_REGISTRY_ABI = parseAbi([
+  "function aiAuditByDepositId(bytes32 depositId) view returns (bytes32 memoSha256, bytes32 inputSha256, bytes32 modelHash, bytes32 promptVersionHash, uint16 confidenceBps, uint64 createdAt, uint8 decision, bytes32 externalRssSha256, bytes32 externalJsonSha256)",
+])
+
+const ZERO_BYTES32 = `0x${"0".repeat(64)}`
 
 type DepositNotice = {
   version: string
@@ -489,6 +494,19 @@ export const runDepositStatus = async (opts: {
           updatedAt: string
           updater: string
         } = null
+    let aiAudit:
+      | null
+      | {
+          memoSha256: string
+          inputSha256: string
+          modelHash: string
+          promptVersionHash: string
+          confidenceBps: string
+          createdAt: string
+          decision: string
+          externalRssSha256: string
+          externalJsonSha256: string
+        } = null
 
     const auditRegistry = cfg.sepoliaAuditRegistryAddress ?? ""
     if (auditRegistry && isHexAddress(auditRegistry)) {
@@ -510,6 +528,42 @@ export const runDepositStatus = async (opts: {
         }
       } catch {
         audit = null
+      }
+
+      try {
+        const result = (await sepoliaClient.readContract({
+          address: auditRegistry as any,
+          abi: AI_AUDIT_REGISTRY_ABI,
+          functionName: "aiAuditByDepositId",
+          args: [depositId as any],
+        })) as any
+
+        const next = {
+          memoSha256: String(result?.[0] ?? ""),
+          inputSha256: String(result?.[1] ?? ""),
+          modelHash: String(result?.[2] ?? ""),
+          promptVersionHash: String(result?.[3] ?? ""),
+          confidenceBps: String(result?.[4] ?? ""),
+          createdAt: String(result?.[5] ?? ""),
+          decision: String(result?.[6] ?? ""),
+          externalRssSha256: String(result?.[7] ?? ""),
+          externalJsonSha256: String(result?.[8] ?? ""),
+        }
+
+        aiAudit =
+          next.memoSha256 === ZERO_BYTES32 &&
+          next.inputSha256 === ZERO_BYTES32 &&
+          next.modelHash === ZERO_BYTES32 &&
+          next.promptVersionHash === ZERO_BYTES32 &&
+          next.confidenceBps === "0" &&
+          next.createdAt === "0" &&
+          next.decision === "0" &&
+          next.externalRssSha256 === ZERO_BYTES32 &&
+          next.externalJsonSha256 === ZERO_BYTES32
+            ? null
+            : next
+      } catch {
+        aiAudit = null
       }
     }
 
@@ -538,7 +592,7 @@ export const runDepositStatus = async (opts: {
       tokenBBalance = bal.toString()
     }
 
-    return { to, amountWei, used, processed, tokenBBalance, audit, depositNoticeSource, reserveApiError }
+    return { to, amountWei, used, processed, tokenBBalance, audit, aiAudit, depositNoticeSource, reserveApiError }
   }
 
   if (!opts.json) {
@@ -572,6 +626,35 @@ export const runDepositStatus = async (opts: {
     }
   }
 
+  const normalizeAiAudit = (
+    aiAudit:
+      | null
+      | {
+          memoSha256: string
+          inputSha256: string
+          modelHash: string
+          promptVersionHash: string
+          confidenceBps: string
+          createdAt: string
+          decision: string
+          externalRssSha256: string
+          externalJsonSha256: string
+        },
+  ) => {
+    if (!aiAudit) return null
+    return {
+      memoSha256: aiAudit.memoSha256 || null,
+      inputSha256: aiAudit.inputSha256 || null,
+      modelHash: aiAudit.modelHash || null,
+      promptVersionHash: aiAudit.promptVersionHash || null,
+      confidenceBps: aiAudit.confidenceBps || null,
+      createdAt: aiAudit.createdAt || null,
+      decision: aiAudit.decision || null,
+      externalRssSha256: aiAudit.externalRssSha256 || null,
+      externalJsonSha256: aiAudit.externalJsonSha256 || null,
+    }
+  }
+
   const intervalSec = Number.isFinite(opts.intervalSec) ? (opts.intervalSec as number) : 5
   const watch = Boolean(opts.watch)
 
@@ -594,7 +677,7 @@ export const runDepositStatus = async (opts: {
       }
     }
 
-    const { to, amountWei, used, processed, tokenBBalance, audit, depositNoticeSource, reserveApiError } = await pollOnce()
+    const { to, amountWei, used, processed, tokenBBalance, audit, aiAudit, depositNoticeSource, reserveApiError } = await pollOnce()
 
     if (opts.json) {
       seq += 1
@@ -616,6 +699,7 @@ export const runDepositStatus = async (opts: {
           tokenBBalance,
           baseSepoliaAddressUrl: processed && to && isHexAddress(to) ? `${baseSepoliaExplorerBase}/address/${to}` : null,
           audit: normalizeAudit(audit),
+          aiAudit: normalizeAiAudit(aiAudit),
         }) + "\n",
       )
     } else {
@@ -653,6 +737,17 @@ export const runDepositStatus = async (opts: {
         if (audit.aiOutputHash) process.stdout.write(`auditAiOutputHash=${audit.aiOutputHash}\n`)
         if (audit.updatedAt) process.stdout.write(`auditUpdatedAt=${audit.updatedAt}\n`)
         if (audit.updater) process.stdout.write(`auditUpdater=${audit.updater}\n`)
+      }
+      if (aiAudit) {
+        if (aiAudit.memoSha256) process.stdout.write(`auditAiMemoSha256=${aiAudit.memoSha256}\n`)
+        if (aiAudit.inputSha256) process.stdout.write(`auditAiInputSha256=${aiAudit.inputSha256}\n`)
+        if (aiAudit.modelHash) process.stdout.write(`auditAiModelHash=${aiAudit.modelHash}\n`)
+        if (aiAudit.promptVersionHash) process.stdout.write(`auditAiPromptVersionHash=${aiAudit.promptVersionHash}\n`)
+        if (aiAudit.confidenceBps) process.stdout.write(`auditAiConfidenceBps=${aiAudit.confidenceBps}\n`)
+        if (aiAudit.createdAt) process.stdout.write(`auditAiCreatedAt=${aiAudit.createdAt}\n`)
+        if (aiAudit.decision) process.stdout.write(`auditAiDecision=${aiAudit.decision}\n`)
+        if (aiAudit.externalRssSha256) process.stdout.write(`auditAiExternalRssSha256=${aiAudit.externalRssSha256}\n`)
+        if (aiAudit.externalJsonSha256) process.stdout.write(`auditAiExternalJsonSha256=${aiAudit.externalJsonSha256}\n`)
       }
     }
 
