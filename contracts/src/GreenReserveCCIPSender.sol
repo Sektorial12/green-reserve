@@ -5,6 +5,20 @@ import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
 import {Client} from "@ccip/ccip/libraries/Client.sol";
 import {IRouterClient} from "@ccip/ccip/interfaces/IRouterClient.sol";
 
+interface IGreenReserveAuditRegistry {
+  function auditByDepositId(bytes32 depositId)
+    external
+    view
+    returns (
+      bytes32 depositNoticeHash,
+      bytes32 reserveAttestationHash,
+      bytes32 complianceDecisionHash,
+      bytes32 aiOutputHash,
+      uint64 updatedAt,
+      address updater
+    );
+}
+
 contract GreenReserveCCIPSender is Ownable {
   IRouterClient public immutable router;
 
@@ -12,11 +26,16 @@ contract GreenReserveCCIPSender is Ownable {
   address public destinationReceiver;
   address public operator;
   uint256 public gasLimit;
+  address public auditRegistry;
 
   error NotOperator(address caller);
   error InsufficientFee(uint256 provided, uint256 required);
+  error AuditNotRecorded(bytes32 depositId);
+  error AuditRegistryCallFailed(address auditRegistry);
 
   event MessageSent(bytes32 indexed messageId, bytes32 indexed depositId, address indexed to, uint256 amount);
+  event AuditRegistrySet(address indexed auditRegistry);
+  event AuditRegistryValidated(bytes32 indexed depositId, address indexed auditRegistry, uint64 updatedAt, address updater);
 
   constructor(
     address routerAddress,
@@ -35,6 +54,11 @@ contract GreenReserveCCIPSender is Ownable {
 
   function setOperator(address newOperator) external onlyOwner {
     operator = newOperator;
+  }
+
+  function setAuditRegistry(address newAuditRegistry) external onlyOwner {
+    auditRegistry = newAuditRegistry;
+    emit AuditRegistrySet(newAuditRegistry);
   }
 
   function setDestination(uint64 destChainSelector, address destReceiver) external onlyOwner {
@@ -65,6 +89,23 @@ contract GreenReserveCCIPSender is Ownable {
 
   function send(address to, uint256 amount, bytes32 depositId) external returns (bytes32 messageId) {
     if (msg.sender != operator) revert NotOperator(msg.sender);
+
+    if (auditRegistry != address(0)) {
+      try IGreenReserveAuditRegistry(auditRegistry).auditByDepositId(depositId) returns (
+        bytes32,
+        bytes32,
+        bytes32,
+        bytes32,
+        uint64 updatedAt,
+        address updater
+      ) {
+        if (updatedAt == 0) revert AuditNotRecorded(depositId);
+        emit AuditRegistryValidated(depositId, auditRegistry, updatedAt, updater);
+      } catch {
+        revert AuditRegistryCallFailed(auditRegistry);
+      }
+    }
+
     if (!router.isChainSupported(destinationChainSelector)) {
       revert IRouterClient.UnsupportedDestinationChain(destinationChainSelector);
     }

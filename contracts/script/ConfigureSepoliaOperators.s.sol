@@ -15,14 +15,23 @@ contract ConfigureSepoliaOperators is Script {
     address senderAddress = vm.envAddress("SENDER");
     address issuerOperator = vm.envAddress("ISSUER_OPERATOR");
     address senderOperator = vm.envAddress("SENDER_OPERATOR");
+    address auditRegistry = vm.envOr("AUDIT_REGISTRY", address(0));
 
     vm.startBroadcast(privateKey);
 
     GreenReserveIssuer issuer = GreenReserveIssuer(issuerAddress);
     issuer.setOperator(issuerOperator);
 
+    if (auditRegistry != address(0)) {
+      issuer.setAuditRegistry(auditRegistry);
+    }
+
     GreenReserveCCIPSender sender = GreenReserveCCIPSender(payable(senderAddress));
     sender.setOperator(senderOperator);
+
+    if (auditRegistry != address(0)) {
+      sender.setAuditRegistry(auditRegistry);
+    }
 
     vm.stopBroadcast();
 
@@ -31,5 +40,6 @@ contract ConfigureSepoliaOperators is Script {
     console2.log("issuerOperator", issuerOperator);
     console2.log("sender", senderAddress);
     console2.log("senderOperator", senderOperator);
+    console2.log("auditRegistry", auditRegistry);
   }
 }
