@@ -10,7 +10,7 @@
   "sepoliaSenderAddress": "0x2cbe21dC3b2531371f3F58756ab6731b2C6Fb38d",
   "sepoliaSenderWriteReceiverAddress": "0x724904f1834F5d7F2e9B6980074Ac96f206A1ACD",
   "baseSepoliaTokenBAddress": "0x20F061Db666A0BC3Fa631C52f8a65DdA287264A1",
-  "baseSepoliaReceiverAddress": "0x66666fFD3b3595c6a45279e83CfDa770285bF1A7",
+  "baseSepoliaReceiverAddress": "0x44D236a8397d0299b160E534E3e5C271732B1F64",
   "sepoliaAuditRegistryAddress": "0xF3C55cb3BeAcC51FaE4d1f9d22e2BF7c31DfB4FA",
   "sepoliaAuditRegistryWriteReceiverAddress": "0xeF6Aa1849BE610fe6a167c17f85A708C9Dcf9732"
 }
