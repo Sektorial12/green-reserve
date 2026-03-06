@@ -4,6 +4,7 @@ import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
 
 import {CREReportReceiverAdapter} from "../src/CREReportReceiverAdapter.sol";
+import {GreenReserveAuditRegistry} from "../src/GreenReserveAuditRegistry.sol";
 
 contract DeploySepoliaAdapters is Script {
   function run() external {
@@ -12,6 +13,7 @@ contract DeploySepoliaAdapters is Script {
     address forwarder = vm.envAddress("CRE_FORWARDER");
     address issuer = vm.envAddress("ISSUER");
     address sender = vm.envAddress("SENDER");
+    address auditRegistry = vm.envOr("AUDIT_REGISTRY", address(0));
 
     vm.startBroadcast(privateKey);
 
@@ -20,10 +22,28 @@ contract DeploySepoliaAdapters is Script {
 
     CREReportReceiverAdapter issuerAdapter = new CREReportReceiverAdapter(forwarder, issuer, issuerSelector);
     CREReportReceiverAdapter senderAdapter = new CREReportReceiverAdapter(forwarder, sender, senderSelector);
+    CREReportReceiverAdapter auditRegistryAdapter;
+
+    if (auditRegistry != address(0)) {
+      bytes4 auditRegistrySelector = GreenReserveAuditRegistry.record.selector;
+      auditRegistryAdapter = new CREReportReceiverAdapter(forwarder, auditRegistry, auditRegistrySelector);
+    }
 
     vm.stopBroadcast();
 
+    console2.log("creForwarder", forwarder);
+    console2.log("issuer", issuer);
     console2.log("issuerAdapter", address(issuerAdapter));
+    console2.log("sender", sender);
     console2.log("senderAdapter", address(senderAdapter));
+    console2.log("auditRegistry", auditRegistry);
+    if (auditRegistry != address(0)) {
+      console2.log("auditRegistryAdapter", address(auditRegistryAdapter));
+    }
+    console2.log("config.sepoliaIssuerWriteReceiverAddress", address(issuerAdapter));
+    console2.log("config.sepoliaSenderWriteReceiverAddress", address(senderAdapter));
+    if (auditRegistry != address(0)) {
+      console2.log("config.sepoliaAuditRegistryWriteReceiverAddress", address(auditRegistryAdapter));
+    }
   }
 }

@@ -5,12 +5,12 @@
   "destChainSelector": "10344971235874465080",
   "sepoliaWriteGasLimit": "1200000",
   "sepoliaTokenAAddress": "0x6bf0a9cfdf9167af8d30e53475752db0dc802b80",
-  "sepoliaIssuerAddress": "0xcdda815db80ea21dad692b469f8d0e27e4853365",
-  "sepoliaIssuerWriteReceiverAddress": "0xDe84d37099e43d0e3931Ba16079575Ad8cF19B63",
-  "sepoliaSenderAddress": "0xc3ea3c53ed3504f4d527fccac5080249341ab185",
-  "sepoliaSenderWriteReceiverAddress": "0x79119BA0c58838675B2F45c53bC8685218149D63",
+  "sepoliaIssuerAddress": "0xb4816cBC7dE40BDB0f506f97E0b4d16136d30cb3",
+  "sepoliaIssuerWriteReceiverAddress": "0x8f5C028D77A4267F9Be9C071506CA409567B50a4",
+  "sepoliaSenderAddress": "0x2cbe21dC3b2531371f3F58756ab6731b2C6Fb38d",
+  "sepoliaSenderWriteReceiverAddress": "0x724904f1834F5d7F2e9B6980074Ac96f206A1ACD",
   "baseSepoliaTokenBAddress": "0x20F061Db666A0BC3Fa631C52f8a65DdA287264A1",
   "baseSepoliaReceiverAddress": "0x66666fFD3b3595c6a45279e83CfDa770285bF1A7",
-  "sepoliaAuditRegistryAddress": "0x83b4C922caA8FE08de7D1411bC000e2BEF8dAD5a",
-  "sepoliaAuditRegistryWriteReceiverAddress": "0xD3D2A491BDfeD035522461b1E9C0e1c399944485"
+  "sepoliaAuditRegistryAddress": "0xF3C55cb3BeAcC51FaE4d1f9d22e2BF7c31DfB4FA",
+  "sepoliaAuditRegistryWriteReceiverAddress": "0xeF6Aa1849BE610fe6a167c17f85A708C9Dcf9732"
 }

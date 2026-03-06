@@ -1,13 +1,18 @@
-import { createPublicClient, hashMessage, http, parseAbi, recoverAddress } from "viem"
+import { createPublicClient, hashMessage, http, keccak256, parseAbi, recoverAddress, toBytes } from "viem"
 import { asUrlBase, fmtBool, httpGetJson, isHexAddress, lower } from "./util"
 import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config"
 
-const ISSUER_ABI = parseAbi(["function operator() view returns (address)"])
+const ISSUER_ABI = parseAbi(["function operator() view returns (address)", "function auditRegistry() view returns (address)"])
 const SENDER_ABI = parseAbi([
   "function operator() view returns (address)",
+  "function auditRegistry() view returns (address)",
   "function estimateFee(address to, uint256 amount, bytes32 depositId) view returns (uint256)",
 ])
 const AUDIT_REGISTRY_ABI = parseAbi(["function operator() view returns (address)"])
+const ADAPTER_ABI = parseAbi([
+  "function target() view returns (address)",
+  "function expectedSelector() view returns (bytes4)",
+])
 
 const RECEIVER_ABI = parseAbi([
   "function allowlistedSourceChains(uint64 chainSelector) view returns (bool)",
@@ -16,6 +21,13 @@ const RECEIVER_ABI = parseAbi([
 
 const SEPOLIA_CHAIN_SELECTOR_ON_BASE = 16015286601757825753n
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000"
+const MINT_SELECTOR = keccak256(toBytes("mint(address,uint256,bytes32)")).slice(0, 10)
+const SEND_SELECTOR = keccak256(toBytes("send(address,uint256,bytes32)")).slice(0, 10)
+const AUDIT_RECORD_SELECTOR = keccak256(
+  toBytes(
+    "record(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32[6],uint64[3])",
+  ),
+).slice(0, 10)
 
 const makeReserveAttestationMessage = (a: {
   asOfTimestamp: number
@@ -204,6 +216,14 @@ export const runDoctor = async (opts: {
   let senderBalanceWei: string | null = null
   let senderEstimatedFeeWei: string | null = null
   let senderIsFunded: boolean | null = null
+  let issuerAuditRegistryLinked: boolean | null = null
+  let senderAuditRegistryLinked: boolean | null = null
+  let issuerWriteReceiverTargetsIssuer: boolean | null = null
+  let issuerWriteReceiverSelectorOk: boolean | null = null
+  let senderWriteReceiverTargetsSender: boolean | null = null
+  let senderWriteReceiverSelectorOk: boolean | null = null
+  let auditRegistryWriteReceiverTargetsRegistry: boolean | null = null
+  let auditRegistryWriteReceiverSelectorOk: boolean | null = null
 
   if (sender && isHexAddress(sender)) {
     try {
@@ -233,6 +253,86 @@ export const runDoctor = async (opts: {
       }
     } catch (e) {
       failures.push(`ccip_sender_funding_check_failed ${(e as Error).message}`)
+    }
+  }
+
+  if (issuer && auditRegistry && isHexAddress(issuer) && isHexAddress(auditRegistry)) {
+    try {
+      const client = createPublicClient({ transport: http(sepoliaRpc) })
+      const linked = (await client.readContract({
+        address: issuer as any,
+        abi: ISSUER_ABI,
+        functionName: "auditRegistry",
+      })) as string
+      issuerAuditRegistryLinked = lower(linked) === lower(auditRegistry)
+      if (!issuerAuditRegistryLinked) failures.push("issuer_auditRegistry_mismatch")
+    } catch (e) {
+      failures.push(`issuer_auditRegistry_check_failed ${(e as Error).message}`)
+    }
+  }
+
+  if (sender && auditRegistry && isHexAddress(sender) && isHexAddress(auditRegistry)) {
+    try {
+      const client = createPublicClient({ transport: http(sepoliaRpc) })
+      const linked = (await client.readContract({
+        address: sender as any,
+        abi: SENDER_ABI,
+        functionName: "auditRegistry",
+      })) as string
+      senderAuditRegistryLinked = lower(linked) === lower(auditRegistry)
+      if (!senderAuditRegistryLinked) failures.push("sender_auditRegistry_mismatch")
+    } catch (e) {
+      failures.push(`sender_auditRegistry_check_failed ${(e as Error).message}`)
+    }
+  }
+
+  if (issuer && issuerWr && isHexAddress(issuer) && isHexAddress(issuerWr)) {
+    try {
+      const client = createPublicClient({ transport: http(sepoliaRpc) })
+      const target = (await client.readContract({
+        address: issuerWr as any,
+        abi: ADAPTER_ABI,
+        functionName: "target",
+      })) as string
+      issuerWriteReceiverTargetsIssuer = lower(target) === lower(issuer)
+      if (!issuerWriteReceiverTargetsIssuer) failures.push("issuer_write_receiver_target_mismatch")
+
+      const selector = String(
+        await client.readContract({
+          address: issuerWr as any,
+          abi: ADAPTER_ABI,
+          functionName: "expectedSelector",
+        }),
+      )
+      issuerWriteReceiverSelectorOk = lower(selector) === lower(MINT_SELECTOR)
+      if (!issuerWriteReceiverSelectorOk) failures.push("issuer_write_receiver_selector_mismatch")
+    } catch (e) {
+      failures.push(`issuer_write_receiver_check_failed ${(e as Error).message}`)
+    }
+  }
+
+  if (sender && senderWr && isHexAddress(sender) && isHexAddress(senderWr)) {
+    try {
+      const client = createPublicClient({ transport: http(sepoliaRpc) })
+      const target = (await client.readContract({
+        address: senderWr as any,
+        abi: ADAPTER_ABI,
+        functionName: "target",
+      })) as string
+      senderWriteReceiverTargetsSender = lower(target) === lower(sender)
+      if (!senderWriteReceiverTargetsSender) failures.push("sender_write_receiver_target_mismatch")
+
+      const selector = String(
+        await client.readContract({
+          address: senderWr as any,
+          abi: ADAPTER_ABI,
+          functionName: "expectedSelector",
+        }),
+      )
+      senderWriteReceiverSelectorOk = lower(selector) === lower(SEND_SELECTOR)
+      if (!senderWriteReceiverSelectorOk) failures.push("sender_write_receiver_selector_mismatch")
+    } catch (e) {
+      failures.push(`sender_write_receiver_check_failed ${(e as Error).message}`)
     }
   }
 
@@ -277,6 +377,24 @@ export const runDoctor = async (opts: {
           functionName: "operator",
         })) as string
         if (lower(operator) !== lower(auditRegistryWr)) failures.push("auditRegistry_operator_mismatch")
+
+        const target = (await client.readContract({
+          address: auditRegistryWr as any,
+          abi: ADAPTER_ABI,
+          functionName: "target",
+        })) as string
+        auditRegistryWriteReceiverTargetsRegistry = lower(target) === lower(auditRegistry)
+        if (!auditRegistryWriteReceiverTargetsRegistry) failures.push("auditRegistry_write_receiver_target_mismatch")
+
+        const selector = String(
+          await client.readContract({
+            address: auditRegistryWr as any,
+            abi: ADAPTER_ABI,
+            functionName: "expectedSelector",
+          }),
+        )
+        auditRegistryWriteReceiverSelectorOk = lower(selector) === lower(AUDIT_RECORD_SELECTOR)
+        if (!auditRegistryWriteReceiverSelectorOk) failures.push("auditRegistry_write_receiver_selector_mismatch")
       }
     } catch (e) {
       failures.push(`auditRegistry_operator_check_failed ${(e as Error).message}`)
@@ -305,8 +423,14 @@ export const runDoctor = async (opts: {
       : null,
     issuer: issuer || undefined,
     issuerWriteReceiver: issuerWr || undefined,
+    issuerAuditRegistryLinked,
+    issuerWriteReceiverTargetsIssuer,
+    issuerWriteReceiverSelectorOk,
     sender: sender || undefined,
     senderWriteReceiver: senderWr || undefined,
+    senderAuditRegistryLinked,
+    senderWriteReceiverTargetsSender,
+    senderWriteReceiverSelectorOk,
     receiver: receiver || undefined,
     ccipSenderBalanceWei: senderBalanceWei,
     ccipEstimatedFeeWei: senderEstimatedFeeWei,
@@ -315,6 +439,8 @@ export const runDoctor = async (opts: {
     baseReceiverAllowlistedSender: receiverAllowlistedSender,
     auditRegistry: auditRegistry || undefined,
     auditRegistryWriteReceiver: auditRegistryWr || undefined,
+    auditRegistryWriteReceiverTargetsRegistry,
+    auditRegistryWriteReceiverSelectorOk,
     failures,
   }
 
@@ -350,8 +476,20 @@ export const runDoctor = async (opts: {
 
   if (issuer) process.stdout.write(`issuer=${issuer}\n`)
   if (issuerWr) process.stdout.write(`issuerWriteReceiver=${issuerWr}\n`)
+  if (issuerAuditRegistryLinked !== null)
+    process.stdout.write(`issuerAuditRegistryLinked=${issuerAuditRegistryLinked ? "true" : "false"}\n`)
+  if (issuerWriteReceiverTargetsIssuer !== null)
+    process.stdout.write(`issuerWriteReceiverTargetsIssuer=${issuerWriteReceiverTargetsIssuer ? "true" : "false"}\n`)
+  if (issuerWriteReceiverSelectorOk !== null)
+    process.stdout.write(`issuerWriteReceiverSelectorOk=${issuerWriteReceiverSelectorOk ? "true" : "false"}\n`)
   if (sender) process.stdout.write(`sender=${sender}\n`)
   if (senderWr) process.stdout.write(`senderWriteReceiver=${senderWr}\n`)
+  if (senderAuditRegistryLinked !== null)
+    process.stdout.write(`senderAuditRegistryLinked=${senderAuditRegistryLinked ? "true" : "false"}\n`)
+  if (senderWriteReceiverTargetsSender !== null)
+    process.stdout.write(`senderWriteReceiverTargetsSender=${senderWriteReceiverTargetsSender ? "true" : "false"}\n`)
+  if (senderWriteReceiverSelectorOk !== null)
+    process.stdout.write(`senderWriteReceiverSelectorOk=${senderWriteReceiverSelectorOk ? "true" : "false"}\n`)
   if (receiver) process.stdout.write(`baseReceiver=${receiver}\n`)
 
   if (senderBalanceWei) process.stdout.write(`ccipSenderBalanceWei=${senderBalanceWei}\n`)
@@ -363,6 +501,12 @@ export const runDoctor = async (opts: {
     process.stdout.write(`baseReceiverAllowlistedSender=${receiverAllowlistedSender ? "true" : "false"}\n`)
   if (auditRegistry) process.stdout.write(`auditRegistry=${auditRegistry}\n`)
   if (auditRegistryWr) process.stdout.write(`auditRegistryWriteReceiver=${auditRegistryWr}\n`)
+  if (auditRegistryWriteReceiverTargetsRegistry !== null)
+    process.stdout.write(
+      `auditRegistryWriteReceiverTargetsRegistry=${auditRegistryWriteReceiverTargetsRegistry ? "true" : "false"}\n`,
+    )
+  if (auditRegistryWriteReceiverSelectorOk !== null)
+    process.stdout.write(`auditRegistryWriteReceiverSelectorOk=${auditRegistryWriteReceiverSelectorOk ? "true" : "false"}\n`)
 
   process.stdout.write(`ok=${fmtBool(failures.length === 0)}\n`)
 
