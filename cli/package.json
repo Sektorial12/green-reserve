@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "greenreserve": "bun src/index.ts",
-    "dev": "bun --watch src/index.ts"
+    "build": "tsc -p tsconfig.json",
+    "greenreserve": "tsc -p tsconfig.json && node dist/index.js",
+    "dev": "tsc -p tsconfig.json && node dist/index.js"
   },
   "dependencies": {
     "commander": "^12.1.0",

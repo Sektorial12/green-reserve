@@ -1,11 +1,25 @@
+import { accessSync, constants as fsConstants } from "node:fs"
+import { readFile } from "node:fs/promises"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 
-export const repoRoot = path.resolve(import.meta.dir, "../..")
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+
+export const repoRoot = path.resolve(__dirname, "../..")
+
+export const readTextFileIfExists = async (filePath: string): Promise<string | null> => {
+  try {
+    return await readFile(filePath, "utf8")
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return null
+    throw e
+  }
+}
 
 export const loadDotEnv = async (filePath: string) => {
-  const file = Bun.file(filePath)
-  if (!(await file.exists())) return
-  const text = await file.text()
+  const text = await readTextFileIfExists(filePath)
+  if (text === null) return
   for (const lineRaw of text.split("\n")) {
     const line = lineRaw.trim()
     if (!line) continue
@@ -20,6 +34,48 @@ export const loadDotEnv = async (filePath: string) => {
     }
     if (process.env[key] === undefined) process.env[key] = value
   }
+}
+
+export const findExecutable = (name: string): string | null => {
+  const raw = (name || "").trim()
+  if (!raw) return null
+
+  const candidates = path.isAbsolute(raw)
+    ? [raw]
+    : String(process.env.PATH ?? "")
+        .split(path.delimiter)
+        .filter(Boolean)
+        .map((dir) => path.join(dir, raw))
+
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, fsConstants.X_OK)
+      return candidate
+    } catch {
+      continue
+    }
+  }
+
+  return null
+}
+
+export const sanitizedChildEnv = (base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
+  const env: NodeJS.ProcessEnv = { ...base }
+  const workflowBin = path.join(repoRoot, "workflows/greenreserve-workflow/node_modules/.bin")
+
+  delete env.LD_LIBRARY_PATH
+  delete env.LD_PRELOAD
+
+  for (const key of Object.keys(env)) {
+    if (key === "SNAP" || key.startsWith("SNAP_")) delete env[key]
+  }
+
+  const minimalPath = [workflowBin, "/snap/bin", "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+  env.PATH = minimalPath.join(path.delimiter)
+
+  if (findExecutable("/snap/bun-js/current/_bun/bin/bun")) env.BUN = "/snap/bun-js/current/_bun/bin/bun"
+
+  return env
 }
 
 export const requireEnv = (name: string): string => {

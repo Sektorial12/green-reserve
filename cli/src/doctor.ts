@@ -1,6 +1,6 @@
 import { createPublicClient, hashMessage, http, keccak256, parseAbi, recoverAddress, toBytes } from "viem"
-import { asUrlBase, fmtBool, httpGetJson, isHexAddress, lower } from "./util"
-import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config"
+import { asUrlBase, findExecutable, fmtBool, httpGetJson, isHexAddress, lower } from "./util.js"
+import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config.js"
 
 const ISSUER_ABI = parseAbi(["function operator() view returns (address)", "function auditRegistry() view returns (address)"])
 const SENDER_ABI = parseAbi([
@@ -67,7 +67,7 @@ export const runDoctor = async (opts: {
   let sanctionsMeta: any = null
   let reserves: any = null
 
-  const crePath = opts.crePath ?? process.env.CRE_CLI_PATH ?? Bun.which("cre") ?? ""
+  const crePath = opts.crePath ?? process.env.CRE_CLI_PATH ?? findExecutable("cre") ?? ""
   if (!crePath) failures.push("missing_cre_cli")
 
   try {

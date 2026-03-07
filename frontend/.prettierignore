@@ -1,7 +1,0 @@
-node_modules
-.next
-out
-build
-package-lock.json
-.lighthouse-tmp
-C:*

@@ -237,14 +237,92 @@ const parseRiskMemo = (raw: unknown): RiskMemo => {
   }
 }
 
+const fallbackEnabled = (): boolean => {
+  const raw = (Bun.env.AI_RISK_MEMO_ALLOW_FALLBACK ?? "true").trim().toLowerCase()
+  return raw !== "false" && raw !== "0" && raw !== "no"
+}
+
+const deterministicFallbackMemo = (input: unknown): RiskMemo => {
+  const o = input && typeof input === "object" ? (input as any) : {}
+  const reserveRatioRaw = String(o?.reserveRatioBps ?? "0")
+  const amountRaw = String(o?.amount ?? "0")
+  const kycAllowed = o?.kyc?.isAllowed
+  const kycReason = String(o?.kyc?.reason ?? "")
+
+  let reserveRatioBps = 0n
+  let amountWei = 0n
+
+  try {
+    reserveRatioBps = /^[0-9]+$/.test(reserveRatioRaw) ? BigInt(reserveRatioRaw) : 0n
+  } catch {
+    reserveRatioBps = 0n
+  }
+
+  try {
+    amountWei = /^[0-9]+$/.test(amountRaw) ? BigInt(amountRaw) : 0n
+  } catch {
+    amountWei = 0n
+  }
+
+  if (kycAllowed === false) {
+    return {
+      riskScore: 95,
+      confidence: 0.99,
+      decision: "reject",
+      reasons: [kycReason || "KYC or sanctions screening denied", "Deterministic local fallback memo used"],
+    }
+  }
+
+  if (reserveRatioBps < 10_000n) {
+    return {
+      riskScore: 88,
+      confidence: 0.97,
+      decision: "reject",
+      reasons: ["Reserve ratio below required threshold", "Deterministic local fallback memo used"],
+    }
+  }
+
+  if (amountWei >= 10_000000000000000000n) {
+    return {
+      riskScore: 58,
+      confidence: 0.8,
+      decision: "manual_review",
+      reasons: ["Large transfer amount exceeds local auto-approval threshold", "Deterministic local fallback memo used"],
+    }
+  }
+
+  return {
+    riskScore: 18,
+    confidence: 0.93,
+    decision: "approve",
+    reasons: ["KYC passed", "Reserve ratio healthy", "Deterministic local fallback memo used"],
+  }
+}
+
+const buildRiskMemoResult = async (
+  model: string,
+  promptVersion: string,
+  inputSha256: string,
+  external: ExternalSignals | null,
+  memo: RiskMemo,
+): Promise<GenerateRiskMemoResult> => {
+  const memoCanonical = JSON.stringify(memo)
+  const memoSha256 = await sha256Hex(memoCanonical)
+
+  return {
+    model,
+    promptVersion,
+    inputSha256,
+    memo,
+    memoSha256,
+    external,
+    createdAtMs: Date.now(),
+  }
+}
+
 export const generateRiskMemo = async (input: unknown): Promise<GenerateRiskMemoResult> => {
-  const apiKey = Bun.env.GEMINI_API_KEY
-  if (!apiKey) throw new Error("missing_GEMINI_API_KEY")
-
-  const model = Bun.env.GEMINI_MODEL ?? "gemini-1.5-pro"
+  const model = Bun.env.GEMINI_MODEL ?? "gemini-flash-latest"
   const promptVersion = Bun.env.AI_RISK_MEMO_PROMPT_VERSION ?? "risk_memo_v1"
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
-
   const external = await loadExternalSignals()
   const baseInput = input && typeof input === "object" ? (input as any) : { input }
   const effectiveInput = {
@@ -267,6 +345,25 @@ export const generateRiskMemo = async (input: unknown): Promise<GenerateRiskMemo
   if (existing) {
     return existing
   }
+
+  const useFallback = fallbackEnabled()
+  const apiKey = Bun.env.GEMINI_API_KEY
+
+  if (!apiKey) {
+    if (!useFallback) throw new Error("missing_GEMINI_API_KEY")
+
+    const result = await buildRiskMemoResult(
+      "local-fallback",
+      promptVersion,
+      inputSha256,
+      external,
+      deterministicFallbackMemo(effectiveInput),
+    )
+    cache.set(inputSha256, { createdAtMs: Date.now(), result })
+    return result
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
 
   const prompt =
     "Return ONLY valid JSON (no markdown) with keys: " +
@@ -310,22 +407,23 @@ export const generateRiskMemo = async (input: unknown): Promise<GenerateRiskMemo
     const parsed = JSON.parse(cleaned)
     const memo = parseRiskMemo(parsed)
 
-    const memoCanonical = JSON.stringify(memo)
-    const memoSha256 = await sha256Hex(memoCanonical)
-
-    const result = {
-      model,
-      promptVersion,
-      inputSha256,
-      memo,
-      memoSha256,
-      external,
-      createdAtMs: Date.now(),
-    }
+    const result = await buildRiskMemoResult(model, promptVersion, inputSha256, external, memo)
 
     cache.set(inputSha256, { createdAtMs: Date.now(), result })
     return result
-  })()
+  })().catch(async (error) => {
+    if (!useFallback) throw error
+
+    const result = await buildRiskMemoResult(
+      "local-fallback",
+      promptVersion,
+      inputSha256,
+      external,
+      deterministicFallbackMemo(effectiveInput),
+    )
+    cache.set(inputSha256, { createdAtMs: Date.now(), result })
+    return result
+  })
 
   inFlight.set(inputSha256, promise)
   try {

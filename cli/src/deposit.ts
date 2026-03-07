@@ -1,10 +1,11 @@
 import prompts from "prompts"
+import { spawn } from "node:child_process"
+import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { tmpdir } from "node:os"
 import { createPublicClient, decodeAbiParameters, decodeEventLog, hashMessage, http, parseAbi, parseEther } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
-import { asUrlBase, httpGetJson, httpPostJson, isHexAddress, isHexBytes32, lower, repoRoot } from "./util"
-import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config"
+import { asUrlBase, findExecutable, httpGetJson, httpPostJson, isHexAddress, isHexBytes32, lower, repoRoot, sanitizedChildEnv } from "./util.js"
+import { defaultWorkflowConfigPath, readWorkflowConfig } from "./config.js"
 
 const ISSUER_ABI = parseAbi(["function usedDepositId(bytes32 depositId) view returns (bool)"])
 const RECEIVER_ABI = parseAbi([
@@ -295,6 +296,7 @@ export const runDepositCreate = async (opts: {
 
 export const runDepositSubmit = async (opts: {
   json?: boolean
+  verbose?: boolean
   depositId: string
   scenario?: string
   target?: string
@@ -308,8 +310,9 @@ export const runDepositSubmit = async (opts: {
   const target = opts.target ?? process.env.TARGET ?? "staging-settings"
   const triggerIndex = Number.isFinite(opts.triggerIndex) ? (opts.triggerIndex as number) : 0
   const scenario = opts.scenario ?? "healthy"
+  const verbose = Boolean(opts.verbose)
 
-  const crePath = opts.crePath ?? process.env.CRE_CLI_PATH ?? Bun.which("cre")
+  const crePath = opts.crePath ?? process.env.CRE_CLI_PATH ?? findExecutable("cre")
   if (!crePath) throw new Error("missing_cre_cli")
 
   if (!process.env.CRE_ETH_PRIVATE_KEY) throw new Error("missing_CRE_ETH_PRIVATE_KEY")
@@ -321,8 +324,10 @@ export const runDepositSubmit = async (opts: {
 
   let tmp = opts.payloadFile
   if (!tmp) {
-    const tmpPath = path.join(tmpdir(), `greenreserve-${depositId}-${Date.now()}.json`)
-    await Bun.write(tmpPath, JSON.stringify(payload, null, 2) + "\n")
+    const payloadDir = path.join(repoRoot, "workflows/greenreserve-workflow/payloads")
+    await mkdir(payloadDir, { recursive: true })
+    const tmpPath = path.join(payloadDir, `greenreserve-${depositId}-${Date.now()}.json`)
+    await writeFile(tmpPath, JSON.stringify(payload, null, 2) + "\n", "utf8")
     tmp = tmpPath
   }
 
@@ -330,6 +335,7 @@ export const runDepositSubmit = async (opts: {
     "workflow",
     "simulate",
     "./workflows/greenreserve-workflow",
+    "-g",
     "-R",
     ".",
     "-T",
@@ -342,27 +348,96 @@ export const runDepositSubmit = async (opts: {
     "--non-interactive",
   ]
 
-  const proc = Bun.spawn([crePath, ...args], {
-    cwd: repoRoot,
-    stdin: "inherit",
-    stdout: opts.json ? "pipe" : "inherit",
-    stderr: opts.json ? "pipe" : "inherit",
-    env: process.env,
-  })
-
-  if (opts.json) {
-    const drainToStderr = async (body: unknown) => {
-      const ab = await new Response(body as any).arrayBuffer()
-      process.stderr.write(new Uint8Array(ab))
-    }
-
-    const drains: Promise<void>[] = []
-    if (proc.stdout) drains.push(drainToStderr(proc.stdout))
-    if (proc.stderr) drains.push(drainToStderr(proc.stderr))
-    await Promise.all(drains)
+  if (verbose) {
+    args.splice(4, 0, "-v")
   }
 
-  const code = await proc.exited
+  if (!opts.json) {
+    process.stdout.write(`depositId=${depositId}\n`)
+    process.stdout.write(`scenario=${scenario}\n`)
+    process.stdout.write(`target=${target}\n`)
+    process.stdout.write(`triggerIndex=${triggerIndex}\n`)
+    process.stdout.write(`payloadFile=${tmp}\n`)
+    process.stdout.write(`crePath=${crePath}\n`)
+    if (!verbose) {
+      process.stdout.write(`note=use --verbose to show full CRE logs\n`)
+    }
+  }
+
+  const mode: "json" | "verbose" | "filtered" = opts.json ? "json" : verbose ? "verbose" : "filtered"
+  const proc = spawn(crePath, args, {
+    cwd: repoRoot,
+    stdio: mode === "verbose" ? "inherit" : ["inherit", "pipe", "pipe"],
+    env: sanitizedChildEnv(process.env),
+  })
+
+  let suppressedTail: string[] = []
+  let ccipTxHash: string | null = null
+  let workflowResult: string | null = null
+
+  const code = await new Promise<number>((resolve, reject) => {
+    proc.on("error", reject)
+
+    if (mode === "json") {
+      proc.stdout?.on("data", (chunk) => process.stderr.write(chunk))
+      proc.stderr?.on("data", (chunk) => process.stderr.write(chunk))
+    }
+
+    if (mode === "filtered") {
+      const keepLine = (line: string): boolean => {
+        if (line.includes("[USER LOG]")) return true
+        if (line.includes("[WORKFLOW] WorkflowExecutionStarted")) return true
+        if (line.includes("[WORKFLOW] WorkflowExecutionFinished")) return true
+        if (line.includes("Workflow compiled")) return true
+        if (line.includes("Workflow Simulation Result")) return true
+        if (/^\s*\"(approved|rejected)\"\s*$/.test(line)) return true
+        return false
+      }
+
+      const onLine = (lineRaw: string) => {
+        const line = String(lineRaw ?? "").replace(/\r$/, "")
+        if (!line) return
+
+        const txMatch = line.match(/ccip_tx_status=\d+\s+txHash=(0x[0-9a-fA-F]{64})/)
+        if (txMatch?.[1]) ccipTxHash = txMatch[1]
+
+        const quotedResult = line.match(/^\s*\"(approved|rejected)\"\s*$/)
+        if (quotedResult?.[1]) workflowResult = quotedResult[1]
+
+        if (keepLine(line)) {
+          process.stdout.write(line + "\n")
+        } else {
+          suppressedTail.push(line)
+          if (suppressedTail.length > 200) suppressedTail = suppressedTail.slice(-200)
+        }
+      }
+
+      const attach = (stream: NodeJS.ReadableStream | null | undefined) => {
+        if (!stream) return
+        let buf = ""
+        stream.on("data", (chunk) => {
+          buf += chunk.toString("utf8")
+          while (true) {
+            const idx = buf.indexOf("\n")
+            if (idx < 0) break
+            const line = buf.slice(0, idx)
+            buf = buf.slice(idx + 1)
+            onLine(line)
+          }
+        })
+        stream.on("end", () => {
+          const rest = buf.trimEnd()
+          if (rest) onLine(rest)
+        })
+      }
+
+      attach(proc.stdout)
+      attach(proc.stderr)
+    }
+
+    proc.on("close", (nextCode) => resolve(nextCode ?? 1))
+  })
+
   if (opts.json) {
     process.stdout.write(
       JSON.stringify({
@@ -375,6 +450,17 @@ export const runDepositSubmit = async (opts: {
         exitCode: code,
       }) + "\n",
     )
+  }
+
+  if (code !== 0 && mode === "filtered" && suppressedTail.length > 0) {
+    process.stderr.write("suppressedCreOutputTailBegin\n")
+    for (const line of suppressedTail) process.stderr.write(line + "\n")
+    process.stderr.write("suppressedCreOutputTailEnd\n")
+  }
+
+  if (!opts.json && !verbose) {
+    if (workflowResult) process.stdout.write(`result=${workflowResult}\n`)
+    if (ccipTxHash) process.stdout.write(`ccipTxHash=${ccipTxHash}\n`)
   }
 
   if (code !== 0) process.exit(code)

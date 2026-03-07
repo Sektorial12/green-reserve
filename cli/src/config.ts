@@ -1,6 +1,6 @@
 import path from "node:path"
 import { z } from "zod"
-import { repoRoot } from "./util"
+import { readTextFileIfExists, repoRoot } from "./util.js"
 
 const configSchema = z.object({
   reserveApiBaseUrl: z.string(),
@@ -24,9 +24,8 @@ export const readWorkflowConfig = async (filePath: string): Promise<WorkflowConf
 
   let text: string | null = null
   for (const p of candidates) {
-    const file = Bun.file(p)
-    if (!(await file.exists())) continue
-    text = await file.text()
+    text = await readTextFileIfExists(p)
+    if (text === null) continue
     break
   }
 

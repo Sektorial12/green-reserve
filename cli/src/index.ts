@@ -1,8 +1,8 @@
 import { Command } from "commander"
 import path from "node:path"
-import { loadDotEnv, repoRoot } from "./util"
-import { runDoctor } from "./doctor"
-import { runDepositCreate, runDepositStatus, runDepositSubmit } from "./deposit"
+import { loadDotEnv, repoRoot } from "./util.js"
+import { runDoctor } from "./doctor.js"
+import { runDepositCreate, runDepositStatus, runDepositSubmit } from "./deposit.js"
 
 const main = async () => {
   await loadDotEnv(path.join(repoRoot, ".env"))
@@ -87,6 +87,7 @@ const main = async () => {
     .command("submit")
     .requiredOption("--deposit-id <bytes32>")
     .option("--json")
+    .option("--verbose")
     .option("--scenario <healthy|unhealthy>")
     .option("--target <cre-target>")
     .option("--trigger-index <n>")
@@ -96,6 +97,7 @@ const main = async () => {
       await runJsonSafe(Boolean(opts.json), async () => {
         await runDepositSubmit({
           json: Boolean(opts.json),
+          verbose: Boolean(opts.verbose),
           depositId: opts.depositId,
           scenario: opts.scenario,
           target: opts.target,

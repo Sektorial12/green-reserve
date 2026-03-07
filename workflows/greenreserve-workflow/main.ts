@@ -49,6 +49,49 @@ const configSchema = z.object({
 
 type Config = z.infer<typeof configSchema>
 
+const base64ToBytes = (value: string): Uint8Array | undefined => {
+  const cleanedUnpadded = value.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/")
+  if (cleanedUnpadded.length === 0) return undefined
+  if (!/^[A-Za-z0-9+/=]+$/.test(cleanedUnpadded)) return undefined
+
+  let cleaned = cleanedUnpadded
+  const remainder = cleaned.length % 4
+  if (remainder === 1) return undefined
+  if (remainder === 2) cleaned = `${cleaned}==`
+  if (remainder === 3) cleaned = `${cleaned}=`
+
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  const padding = cleaned.endsWith("==") ? 2 : cleaned.endsWith("=") ? 1 : 0
+  const outputLen = (cleaned.length / 4) * 3 - padding
+  if (outputLen < 0) return undefined
+
+  const output = new Uint8Array(outputLen)
+  let outIndex = 0
+
+  for (let index = 0; index < cleaned.length; index += 4) {
+    const c0 = cleaned[index] ?? ""
+    const c1 = cleaned[index + 1] ?? ""
+    const c2 = cleaned[index + 2] ?? ""
+    const c3 = cleaned[index + 3] ?? ""
+
+    const v0 = alphabet.indexOf(c0)
+    const v1 = alphabet.indexOf(c1)
+    const v2 = c2 === "=" ? 0 : alphabet.indexOf(c2)
+    const v3 = c3 === "=" ? 0 : alphabet.indexOf(c3)
+    if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0) return undefined
+
+    const triple = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3
+    if (outIndex < outputLen) output[outIndex] = (triple >> 16) & 0xff
+    outIndex += 1
+    if (outIndex < outputLen && c2 !== "=") output[outIndex] = (triple >> 8) & 0xff
+    outIndex += 1
+    if (outIndex < outputLen && c3 !== "=") output[outIndex] = triple & 0xff
+    outIndex += 1
+  }
+
+  return output
+}
+
 const depositSchema = z.object({
   depositId: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
   to: z.string().optional(),
@@ -552,7 +595,104 @@ const readReceiverRouter = (runtime: Runtime<Config>, receiverAddress: Address) 
   }) as Address
 }
 
-const tryExtractMessageIdFromSepoliaReceipt = (runtime: Runtime<Config>, senderAddress: Address, txHashHex: `0x${string}`) => {
+const normalizeHex = (value: unknown): `0x${string}` | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === "string") {
+    if (value.startsWith("0x")) return value as `0x${string}`
+
+    if (/^[0-9a-fA-F]+$/.test(value) && value.length % 2 === 0) {
+      return `0x${value}` as `0x${string}`
+    }
+
+    const maybeBytes = base64ToBytes(value)
+    if (maybeBytes) return bytesToHex(maybeBytes) as `0x${string}`
+
+    return `0x${value}` as `0x${string}`
+  }
+
+  if (value instanceof Uint8Array) {
+    return bytesToHex(value) as `0x${string}`
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return bytesToHex(new Uint8Array(value)) as `0x${string}`
+  }
+
+  if (Array.isArray(value) && value.every((nestedValue) => typeof nestedValue === "number")) {
+    return bytesToHex(Uint8Array.from(value)) as `0x${string}`
+  }
+
+  return bytesToHex(value as Uint8Array) as `0x${string}`
+}
+
+const stringifyJsonValue = (value: unknown): string =>
+  JSON.stringify(value, (_key, nestedValue) => (typeof nestedValue === "bigint" ? nestedValue.toString() : nestedValue))
+
+const isHex32Value = (value: string): value is `0x${string}` => {
+  if (value.length !== 66) return false
+  if (!value.startsWith("0x")) return false
+
+  for (let index = 2; index < value.length; index += 1) {
+    const char = value[index]
+    if (!char) return false
+    const isDigit = char >= "0" && char <= "9"
+    const isLowerHex = char >= "a" && char <= "f"
+    if (!isDigit && !isLowerHex) return false
+  }
+
+  return true
+}
+
+const toArray = <T>(value: ArrayLike<T> | Iterable<T> | undefined | null): T[] => {
+  if (!value) return []
+
+  return Array.from(value)
+}
+
+const tryExtractMessageIdFromReceiptText = (
+  receiptText: string,
+  _senderAddress: Address,
+  depositId: `0x${string}`,
+) => {
+  const receiptTextLc = receiptText.toLowerCase()
+  const depositIdLc = depositId.toLowerCase()
+  const messageSentSigLc = MESSAGE_SENT_TOPIC0.toLowerCase()
+
+  if (!receiptTextLc.includes(messageSentSigLc)) return undefined
+  if (!receiptTextLc.includes(depositIdLc)) return undefined
+
+  const compactTopicPrefix = `"topics":["${messageSentSigLc}","`
+  const compactDepositSuffix = `","${depositIdLc}"`
+
+  let searchFrom = 0
+  while (searchFrom < receiptTextLc.length) {
+    const topicIndex = receiptTextLc.indexOf(compactTopicPrefix, searchFrom)
+    if (topicIndex === -1) break
+
+    const messageIdStart = topicIndex + compactTopicPrefix.length
+    const depositIndex = receiptTextLc.indexOf(compactDepositSuffix, messageIdStart)
+    if (depositIndex === -1) {
+      searchFrom = topicIndex + compactTopicPrefix.length
+      continue
+    }
+
+    const messageId = receiptTextLc.slice(messageIdStart, depositIndex)
+    if (isHex32Value(messageId)) {
+      return messageId
+    }
+
+    searchFrom = topicIndex + compactTopicPrefix.length
+  }
+
+  return undefined
+}
+
+const tryExtractMessageIdFromSepoliaReceipt = (
+  runtime: Runtime<Config>,
+  senderAddress: Address,
+  depositId: `0x${string}`,
+  txHashHex: `0x${string}`,
+) => {
   const network = getNetwork({
     chainFamily: "evm",
     chainSelectorName: runtime.config.sepoliaChainSelectorName,
@@ -570,18 +710,46 @@ const tryExtractMessageIdFromSepoliaReceipt = (runtime: Runtime<Config>, senderA
   const receipt = reply.receipt
   if (!receipt) return undefined
 
-  const senderAddressLc = senderAddress.toLowerCase()
+  const rawReceiptText = stringifyJsonValue(receipt)
+  const rawReceiptTextMatch = tryExtractMessageIdFromReceiptText(rawReceiptText, senderAddress, depositId)
+  if (rawReceiptTextMatch) return rawReceiptTextMatch
+
+  const receiptLogs = toArray(
+    receipt.logs as
+      | ArrayLike<{ address: unknown; topics?: ArrayLike<unknown> | Iterable<unknown> }>
+      | Iterable<{ address: unknown; topics?: ArrayLike<unknown> | Iterable<unknown> }>
+      | undefined,
+  )
+  const normalizedReceiptLogs = receiptLogs.map((log) => ({
+    address: normalizeHex(log.address)?.toLowerCase() ?? "",
+    topics: toArray(log.topics).map((topic) => normalizeHex(topic)?.toLowerCase() ?? ""),
+  }))
+
+  const receiptText = stringifyJsonValue(normalizedReceiptLogs)
+  const receiptTextMatch = tryExtractMessageIdFromReceiptText(receiptText, senderAddress, depositId)
+  if (receiptTextMatch) return receiptTextMatch
+
+  const depositIdLc = depositId.toLowerCase()
   const messageSentSigLc = MESSAGE_SENT_TOPIC0.toLowerCase()
 
-  for (const log of receipt.logs) {
-    const addressHex = bytesToHex(log.address).toLowerCase()
-    const eventSigHex = bytesToHex(log.eventSig).toLowerCase()
-    if (addressHex !== senderAddressLc) continue
-    if (eventSigHex !== messageSentSigLc) continue
-    if (log.topics.length < 3) continue
+  for (const log of normalizedReceiptLogs) {
+    const eventSigHex = log.topics.length > 0 ? log.topics[0] ?? "" : ""
+    const depositTopicHex = log.topics.length > 2 ? log.topics[2] ?? "" : ""
+    if (eventSigHex === messageSentSigLc && depositTopicHex === depositIdLc) {
+      if (log.topics.length < 2) continue
 
-    const messageId = bytesToHex(log.topics[1]) as `0x${string}`
-    return messageId
+      const messageId = log.topics[1] as `0x${string}` | undefined
+      if (messageId) return messageId
+    }
+
+    const logJsonLc = stringifyJsonValue(log).toLowerCase()
+    if (!logJsonLc.includes(messageSentSigLc)) continue
+    if (!logJsonLc.includes(depositIdLc)) continue
+
+    const topicMatch = tryExtractMessageIdFromReceiptText(logJsonLc, senderAddress, depositId)
+    if (!topicMatch) continue
+
+    return topicMatch
   }
 
   return undefined
@@ -788,13 +956,18 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
   }
   const http = new cre.capabilities.HTTPClient()
   const baseUrl = runtime.config.reserveApiBaseUrl.replace(/\/$/, "")
+  const depositUrl = `${baseUrl}/deposits?depositId=${encodeURIComponent(deposit.depositId)}`
+  const reservesUrl = `${baseUrl}/reserves`
+
+  runtime.log(`stage=trigger_parsed depositId=${deposit.depositId} scenario=${deposit.scenario ?? ""}`)
 
   let dep: DepositApiResponse
   try {
+    runtime.log(`stage=fetch_deposit_notice url=${depositUrl}`)
     const depText = http
       .sendRequest(
         runtime,
-        fetchJsonText(`${baseUrl}/deposits?depositId=${encodeURIComponent(deposit.depositId)}`),
+        fetchJsonText(depositUrl),
         consensusIdenticalAggregation()
       )()
       .result()
@@ -852,8 +1025,9 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
 
   let reserves: ReservesApiResponse
   try {
+    runtime.log(`stage=fetch_reserves url=${reservesUrl}`)
     const reservesText = http
-      .sendRequest(runtime, fetchJsonText(`${baseUrl}/reserves`), consensusIdenticalAggregation())()
+      .sendRequest(runtime, fetchJsonText(reservesUrl), consensusIdenticalAggregation())()
       .result()
     reserves = reservesApiResponseSchema.parse(safeJsonParse(reservesText))
   } catch (e) {
@@ -891,10 +1065,12 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
     )
   }
 
+  const kycUrl = `${baseUrl}/policy/kyc?address=${to}`
+  runtime.log(`stage=fetch_kyc url=${kycUrl}`)
   let kyc: KycApiResponse
   try {
     const kycText = http
-      .sendRequest(runtime, fetchJsonText(`${baseUrl}/policy/kyc?address=${to}`), consensusIdenticalAggregation())()
+      .sendRequest(runtime, fetchJsonText(kycUrl), consensusIdenticalAggregation())()
       .result()
     kyc = kycApiResponseSchema.parse(safeJsonParse(kycText))
   } catch (e) {
@@ -933,13 +1109,13 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
     externalJsonSha256: string
     externalJsonUrl: string
   } = null
+  const aiUrl = `${baseUrl}/ai/risk-memo?depositId=${encodeURIComponent(deposit.depositId)}&to=${encodeURIComponent(
+    to
+  )}&amount=${encodeURIComponent(amountWei)}&reserveRatioBps=${encodeURIComponent(
+    reserves.reserveRatioBps
+  )}&kycAllowed=${encodeURIComponent(String(kyc.isAllowed))}&kycReason=${encodeURIComponent(kyc.reason ?? "")}`
   try {
-    const aiUrl = `${baseUrl}/ai/risk-memo?depositId=${encodeURIComponent(deposit.depositId)}&to=${encodeURIComponent(
-      to
-    )}&amount=${encodeURIComponent(amountWei)}&reserveRatioBps=${encodeURIComponent(
-      reserves.reserveRatioBps
-    )}&kycAllowed=${encodeURIComponent(String(kyc.isAllowed))}&kycReason=${encodeURIComponent(kyc.reason ?? "")}`
-
+    runtime.log(`stage=fetch_ai_risk_memo url=${aiUrl}`)
     const aiText = http
       .sendRequest(runtime, fetchJsonText(aiUrl), consensusIdenticalAggregation())()
       .result()
@@ -1014,6 +1190,7 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
   const isHealthy = reserveRatioBps >= 10_000n
 
   try {
+    runtime.log("stage=read_router_support")
     const chainSupported = readRouterIsChainSupported(runtime)
     runtime.log(`sepoliaRouterSupportsDest=${chainSupported.toString()}`)
   } catch (e) {
@@ -1056,6 +1233,7 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
     const auditRegistryWriteReceiverAddress =
       runtime.config.sepoliaAuditRegistryWriteReceiverAddress || auditRegistryAddress
 
+    runtime.log(`stage=write_audit receiver=${auditRegistryWriteReceiverAddress}`)
     const auditReply = writeAuditRecord(
       runtime,
       auditRegistryWriteReceiverAddress as Address,
@@ -1097,32 +1275,33 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
     return "approved"
   }
 
+  runtime.log(`stage=read_issuer_used_depositId issuer=${issuerAddress}`)
   const used = readIssuerUsedDepositId(runtime, issuerAddress as Address, deposit.depositId as `0x${string}`)
   if (used) {
     runtime.log("mint_skipped_depositId_used")
-    return "approved"
-  }
+  } else {
+    const issuerWriteReceiverAddress = runtime.config.sepoliaIssuerWriteReceiverAddress || issuerAddress
+    runtime.log(`stage=write_mint receiver=${issuerWriteReceiverAddress} to=${to} amount=${amountWei}`)
+    const mintReply = writeIssuerMint(
+      runtime,
+      issuerWriteReceiverAddress as Address,
+      to as Address,
+      BigInt(amountWei),
+      deposit.depositId as `0x${string}`
+    )
 
-  const issuerWriteReceiverAddress = runtime.config.sepoliaIssuerWriteReceiverAddress || issuerAddress
-  const mintReply = writeIssuerMint(
-    runtime,
-    issuerWriteReceiverAddress as Address,
-    to as Address,
-    BigInt(amountWei),
-    deposit.depositId as `0x${string}`
-  )
+    runtime.log(
+      `mint_tx_status=${mintReply.txStatus.toString()} txHash=${mintReply.txHash ? bytesToHex(mintReply.txHash) : ""} error=${mintReply.errorMessage ?? ""}`
+    )
 
-  runtime.log(
-    `mint_tx_status=${mintReply.txStatus.toString()} txHash=${mintReply.txHash ? bytesToHex(mintReply.txHash) : ""} error=${mintReply.errorMessage ?? ""}`
-  )
+    runtime.log(
+      `mint_receiver_status=${mintReply.receiverContractExecutionStatus?.toString() ?? ""}`
+    )
 
-  runtime.log(
-    `mint_receiver_status=${mintReply.receiverContractExecutionStatus?.toString() ?? ""}`
-  )
-
-  if (mintReply.txStatus !== 2 || (mintReply.receiverContractExecutionStatus !== undefined && mintReply.receiverContractExecutionStatus !== 0)) {
-    runtime.log("mint_failed_skip_ccip_send")
-    return "approved"
+    if (mintReply.txStatus !== 2 || (mintReply.receiverContractExecutionStatus !== undefined && mintReply.receiverContractExecutionStatus !== 0)) {
+      runtime.log("mint_failed_skip_ccip_send")
+      return "approved"
+    }
   }
 
   const senderAddress = runtime.config.sepoliaSenderAddress
@@ -1135,6 +1314,7 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
   }
 
   try {
+    runtime.log(`stage=read_sender_config sender=${senderAddress}`)
     const senderConfig = readSenderConfig(runtime, senderAddress as Address)
     const expectedDestSelector = BigInt(runtime.config.destChainSelector)
     const expectedReceiver = receiverAddress as Address
@@ -1179,12 +1359,14 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
     runtime.log(`ccip_sender_config_error=${(e as Error).message}`)
   }
 
+  runtime.log(`stage=read_receiver_processed_depositId receiver=${receiverAddress}`)
   const alreadyProcessed = readReceiverProcessedDepositId(runtime, receiverAddress as Address, deposit.depositId as `0x${string}`)
   if (alreadyProcessed) {
     runtime.log("ccip_send_skipped_already_processed")
     return "approved"
   }
 
+  runtime.log(`stage=estimate_ccip_fee sender=${senderAddress} to=${to} amount=${amountWei}`)
   const fee = readSenderEstimateFee(
     runtime,
     senderAddress as Address,
@@ -1194,6 +1376,7 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
   )
   runtime.log(`ccip_fee_wei=${fee.toString()}`)
 
+  runtime.log(`stage=write_ccip_send receiver=${senderWriteReceiverAddress} to=${to} amount=${amountWei}`)
   const sendReply = writeSenderSend(
     runtime,
     senderWriteReceiverAddress as Address,
@@ -1216,6 +1399,7 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
   }
 
   try {
+    runtime.log(`stage=read_post_send_processed_depositId receiver=${receiverAddress}`)
     const postProcessed = readReceiverProcessedDepositId(runtime, receiverAddress as Address, deposit.depositId as `0x${string}`)
     runtime.log(`ccip_post_send_processedDepositId=${postProcessed.toString()}`)
   } catch (e) {
@@ -1223,10 +1407,18 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
   }
 
   let messageId: `0x${string}` | undefined
+  let receiptLookupAttempted = false
   try {
+    runtime.log("stage=extract_message_id_from_receipt")
     const sendTxHashHex = (sendReply.txHash ? bytesToHex(sendReply.txHash) : undefined) as `0x${string}` | undefined
     if (sendTxHashHex) {
-      messageId = tryExtractMessageIdFromSepoliaReceipt(runtime, senderAddress as Address, sendTxHashHex)
+      receiptLookupAttempted = true
+      messageId = tryExtractMessageIdFromSepoliaReceipt(
+        runtime,
+        senderAddress as Address,
+        deposit.depositId as `0x${string}`,
+        sendTxHashHex,
+      )
       if (messageId) runtime.log(`ccip_messageId_from_receipt=${messageId}`)
     }
   } catch (e) {
@@ -1234,23 +1426,29 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
   }
 
   if (!messageId) {
-    try {
-      const scan = findSepoliaMessageId(runtime, senderAddress as Address, deposit.depositId as `0x${string}`)
-      runtime.log(`ccip_messageId_scan_window=${scan.searchFrom.toString()}..${scan.searchTo.toString()}`)
-      if (scan.found) {
-        messageId = scan.messageId
-        runtime.log(`ccip_messageId_from_scan=${messageId}`)
-      } else {
-        runtime.log("ccip_messageId_not_found")
+    if (receiptLookupAttempted) {
+      runtime.log("ccip_messageId_receipt_unresolved")
+    } else {
+      try {
+        runtime.log("stage=scan_message_id_from_logs")
+        const scan = findSepoliaMessageId(runtime, senderAddress as Address, deposit.depositId as `0x${string}`)
+        runtime.log(`ccip_messageId_scan_window=${scan.searchFrom.toString()}..${scan.searchTo.toString()}`)
+        if (scan.found) {
+          messageId = scan.messageId
+          runtime.log(`ccip_messageId_from_scan=${messageId}`)
+        } else {
+          runtime.log("ccip_messageId_not_found")
+        }
+      } catch (e) {
+        runtime.log(`ccip_messageId_scan_error=${(e as Error).message}`)
       }
-    } catch (e) {
-      runtime.log(`ccip_messageId_scan_error=${(e as Error).message}`)
     }
   }
 
   if (messageId) {
     let messageReceivedFound = false
     try {
+      runtime.log(`stage=scan_base_message_received receiver=${receiverAddress} messageId=${messageId}`)
       const received = findBaseMessageReceived(runtime, receiverAddress as Address, messageId)
       runtime.log(`base_messageReceived_scan_window=${received.searchFrom.toString()}..${received.searchTo.toString()}`)
       if (received.found) {
@@ -1267,6 +1465,7 @@ const onHttpTrigger = async (runtime: Runtime<Config>, triggerOutput: HTTPPayloa
 
     if (!messageReceivedFound) {
       try {
+        runtime.log(`stage=scan_base_router_message_executed receiver=${receiverAddress} messageId=${messageId}`)
         const baseRouter = readReceiverRouter(runtime, receiverAddress as Address)
         const executed = findBaseRouterMessageExecuted(runtime, baseRouter, messageId)
         runtime.log(`base_routerMessageExecuted_scan_window=${executed.searchFrom.toString()}..${executed.searchTo.toString()}`)
